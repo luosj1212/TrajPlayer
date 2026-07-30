@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a focused viewer, format, or performance improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow
+      description: What are you trying to inspect or accomplish?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Current workaround or alternatives
+  - type: input
+    id: scale
+    attributes:
+      label: Typical trajectory scale
+      placeholder: Format, atom count, frame count, and file size

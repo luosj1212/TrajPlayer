@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments
+.venv/
+.venv-*/
+venv/
+
+# Build products
+build/
+dist/
+*.zip
+*.tar.gz
+*.sha256
+
+# Trajectory data and generated sidecar caches
+*.tpdata/
+*.traj
+*.xtc
+*.trr
+*.dcd
+*.nc
+
+# Local benchmarks, logs, and visual checks
+benchmark-*.json
+benchmark-*.png
+*-check.json
+traj_player_error.log
+/*.png
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
