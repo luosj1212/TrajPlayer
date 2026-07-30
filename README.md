@@ -11,7 +11,7 @@ molecular dynamics trajectories.
 
 TrajPlayer focuses on one job: opening local ASE and Gromacs trajectories
 quickly and playing them smoothly with bounded memory use. It is a lightweight
-viewer, not a replacement for the analysis pipelines in OVITO, VMD, or VIAMD.
+viewer designed to work alongside the wider molecular-visualization ecosystem.
 
 > **Alpha release:** file compatibility and cache metadata may still change.
 > Keep the original trajectory files.
@@ -31,8 +31,8 @@ responsive without loading the whole trajectory into RAM.
 
 Gromacs became another frequent part of the same workflow, so support was
 extended to GRO structures and XTC/TRR trajectories. The project remains
-deliberately focused on fast local inspection rather than reproducing the broad
-analysis and publication-rendering features of established molecular tools.
+focused on fast local inspection, while analysis and publication workflows can
+continue in the specialized tools users already prefer.
 
 ## Highlights
 
@@ -71,31 +71,23 @@ start if only the executable is copied out of its directory.
 For XTC/TRR, select or drop the trajectory and GRO file together. Opening the
 trajectory alone also works when a same-named GRO file is beside it.
 
-## Alternatives and Scope
+## Related Workflows
 
-There are several good ways to inspect ASE trajectories. TrajPlayer is intended
-to complement them, not hide their existence.
+TrajPlayer is one of several ways to work with ASE trajectories. ASE provides
+its own GUI, [ZnDraw](https://zndraw.readthedocs.io/) provides a browser-based
+environment, and [NGLView](https://nglviewer.org/nglview/) integrates trajectory
+display into Jupyter. Tools such as [OVITO](https://www.ovito.org/) and VMD are
+also widely used throughout atomistic simulation workflows.
 
-| Tool | ASE `.traj` workflow | Best suited for |
-| --- | --- | --- |
-| [ASE GUI](https://ase-lib.org/ase/gui/gui.html) | Direct: `ase gui md.traj` | Small or medium trajectories, ASE-native properties, plots, and basic measurements |
-| [ZnDraw](https://zndraw.readthedocs.io/) | Direct through ASE I/O | Browser-based viewing, remote access, editing, and collaboration |
-| [NGLView](https://nglviewer.org/nglview/) | Direct from an ASE `Trajectory` in Python | Jupyter notebooks and interactive molecular representations |
-| [OVITO Pro](https://www.ovito.org/manual/reference/file_formats/input/ase_trajectory.html) | Direct ASE trajectory reader | Rich analysis pipelines, selections, modifiers, and rendering |
-| OVITO Basic, VMD, and similar tools | Convert first, commonly to extXYZ | Mature analysis or specialized visualization after conversion |
-| **TrajPlayer** | Direct drag-and-drop | Large local trajectories, fast startup, live scrubbing, and bounded memory use |
-
-Conversion remains a perfectly valid option:
+ASE can convert trajectories for use with other file-based tools:
 
 ```bash
 ase convert md.traj md.extxyz
 ```
 
-For multi-gigabyte trajectories, however, conversion adds waiting time, creates
-another large file, and may not preserve every calculator-specific property.
-TrajPlayer targets that gap: a native desktop viewer that needs neither a
-notebook, a format-conversion step, nor an OVITO Pro license for direct `.traj`
-playback.
+The right viewer depends on the surrounding workflow. TrajPlayer simply offers
+a native desktop path for users who want to open ASE and Gromacs trajectories
+directly and inspect them with a compact set of playback controls.
 
 ## Run From Source
 
