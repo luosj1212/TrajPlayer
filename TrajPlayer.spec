@@ -1,24 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+import sys
 from pathlib import Path
 
 project_root = Path(SPECPATH)
 extra_binaries = []
 if os.name == 'nt':
-    conda_prefix = os.environ.get('CONDA_PREFIX')
-    conda_bin = Path(conda_prefix) / 'Library' / 'bin' if conda_prefix else None
-    for dll_name in (
-        'libcrypto-3-x64.dll',
-        'libssl-3-x64.dll',
-        'libexpat.dll',
-        'ffi.dll',
-        'libbz2.dll',
-        'liblzma.dll',
-        'sqlite3.dll',
-    ):
-        dll_path = conda_bin / dll_name if conda_bin is not None else None
-        if dll_path is not None and dll_path.exists():
-            extra_binaries.append((str(dll_path), '.'))
+    conda_prefixes = [Path(sys.prefix)]
+    if os.environ.get('CONDA_PREFIX'):
+        conda_prefixes.insert(0, Path(os.environ['CONDA_PREFIX']))
+    for conda_prefix in dict.fromkeys(conda_prefixes):
+        conda_bin = conda_prefix / 'Library' / 'bin'
+        for dll_name in (
+            'libcrypto-3-x64.dll',
+            'libssl-3-x64.dll',
+            'libexpat.dll',
+            'ffi.dll',
+            'libbz2.dll',
+            'liblzma.dll',
+            'sqlite3.dll',
+        ):
+            dll_path = conda_bin / dll_name
+            if dll_path.exists():
+                extra_binaries.append((str(dll_path), '.'))
 
 
 a = Analysis(

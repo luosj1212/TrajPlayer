@@ -48,15 +48,43 @@ continue in the specialized tools users already prefer.
 
 ## Downloads
 
-Prebuilt packages are attached to the
-[GitHub Releases](https://github.com/luosj1212/TrajPlayer/releases) page.
+Prebuilt portable packages are attached to the
+[GitHub Releases](https://github.com/luosj1212/TrajPlayer/releases) page. These
+are different from the source archive offered by **Code > Download ZIP**.
 
-1. Download the archive for your operating system.
-2. Extract the complete `TrajPlayer` directory.
-3. Run `TrajPlayer.exe` on Windows or `./TrajPlayer/TrajPlayer` on Linux.
+### Windows Portable Package
 
-Keep the `_internal` directory beside the executable. The application will not
-start if only the executable is copied out of its directory.
+1. Open GitHub Releases and download
+   `TrajPlayer-Windows-x64-v0.1.0-alpha.1.zip`, not the source-code ZIP.
+2. Extract the archive completely.
+3. Run `TrajPlayer\TrajPlayer.exe` from the extracted directory.
+4. Use **Open** or drag trajectory files into the application window.
+
+Python and Conda are not required. Keep the `_internal` directory beside
+`TrajPlayer.exe`; copying or sharing the executable by itself will prevent the
+application from starting.
+
+### Linux Portable Package
+
+Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.1.tar.gz` from GitHub Releases
+and extract the complete archive. Python is not required. Then run:
+
+```bash
+chmod +x TrajPlayer/TrajPlayer
+./TrajPlayer/TrajPlayer
+```
+
+The portable build requires Linux x86_64, an OpenGL 3.3 capable GPU and driver,
+and the common Qt XCB runtime libraries listed under [Requirements](#requirements).
+
+### Opening Trajectories
+
+- ASE `.traj`, `.xyz`, and `.extxyz` files can be opened directly with
+  **Open** or dragged into the window.
+- For Gromacs trajectories, select the GRO topology together with its XTC/TRR
+  trajectory, or drag both files into the window together.
+- When a same-named GRO file is beside an XTC/TRR trajectory, TrajPlayer can
+  also try to locate the topology when the trajectory is opened by itself.
 
 ## Supported Files
 
