@@ -82,9 +82,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          notes_file="docs/releases/${GITHUB_REF_NAME}.md"
+          test -f "$notes_file"
           gh release create "$GITHUB_REF_NAME" release-assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --prerelease \
             --title "TrajPlayer ${GITHUB_REF_NAME#v}" \
-            --notes-file docs/releases/v0.1.0-alpha.1.md
+            --notes-file "$notes_file"

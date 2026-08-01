@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import numpy as np
 
-from .binary_store import BinaryTrajectoryStore
+from .binary_store import BinaryTrajectoryStore, prepare_cache_directory
 
 
 def create_synthetic_store(
@@ -23,8 +22,7 @@ def create_synthetic_store(
         raise ValueError("chunk_frames must be positive")
 
     root = root.resolve()
-    if root.exists():
-        shutil.rmtree(root)
+    root, temporary_cache = prepare_cache_directory(root)
 
     atom_numbers = np.resize(np.array([6, 1, 8, 7, 16], dtype=np.uint16), atom_count)
     store = BinaryTrajectoryStore.create(
@@ -35,6 +33,7 @@ def create_synthetic_store(
         source_path=None,
         source_mtime_ns=0,
         source_size=frame_count * atom_count * 3 * 4,
+        temporary_cache=temporary_cache,
     )
     store.metadata["synthetic"] = True
     store.metadata["benchmark_atom_count"] = atom_count

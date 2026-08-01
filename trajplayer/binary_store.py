@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -20,6 +23,49 @@ METADATA_FILE = "metadata.json"
 
 def cache_dir_for_source(source_path: Path) -> Path:
     return source_path.with_name(f"{source_path.name}.tpdata")
+
+
+def prepare_cache_directory(root: Path) -> tuple[Path, bool]:
+    """Create an empty cache directory without deleting a cache in active use."""
+    root = root.resolve()
+    if not root.exists():
+        root.mkdir(parents=True, exist_ok=True)
+        return root, False
+
+    if os.name != "nt":
+        shutil.rmtree(root)
+        root.mkdir(parents=True, exist_ok=True)
+        return root, False
+
+    retired = _unique_sibling(root, "retired")
+    try:
+        root.rename(retired)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) not in {5, 32}:
+            raise
+        temporary = _unique_sibling(root, "session")
+        temporary.mkdir(parents=True, exist_ok=False)
+        return temporary, True
+
+    try:
+        root.mkdir(parents=True, exist_ok=False)
+    except Exception:
+        try:
+            retired.rename(root)
+        except OSError:
+            pass
+        raise
+    try:
+        shutil.rmtree(retired)
+    except OSError:
+        pass
+    return root, False
+
+
+def _unique_sibling(root: Path, purpose: str) -> Path:
+    return root.with_name(
+        f".{root.name}.{purpose}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    )
 
 
 @dataclass(frozen=True)
@@ -137,6 +183,7 @@ class BinaryTrajectoryStore:
         store_cells: bool = False,
         progressive: bool = False,
         random_access: bool = False,
+        temporary_cache: bool = False,
     ) -> "BinaryTrajectoryStore":
         root = root.resolve()
         root.mkdir(parents=True, exist_ok=True)
@@ -178,6 +225,7 @@ class BinaryTrajectoryStore:
             "complete": not progressive,
             "available_frame_count": 0 if progressive else int(frame_count),
             "random_access": bool(random_access),
+            "temporary_cache": bool(temporary_cache),
             "source": SourceIdentity.from_path(
                 source_path,
                 source_mtime_ns,
@@ -344,6 +392,11 @@ class BinaryTrajectoryStore:
             if mmap_obj is not None:
                 mmap_obj.close()
         self._closed = True
+        if self.metadata.get("temporary_cache"):
+            try:
+                shutil.rmtree(self.root)
+            except OSError:
+                pass
 
     def __enter__(self) -> "BinaryTrajectoryStore":
         return self

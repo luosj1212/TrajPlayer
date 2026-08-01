@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +7,7 @@ from typing import Callable
 
 import numpy as np
 
-from .binary_store import BinaryTrajectoryStore, cache_dir_for_source
+from .binary_store import BinaryTrajectoryStore, cache_dir_for_source, prepare_cache_directory
 from .trajectory_source import TrajectorySource
 
 
@@ -63,8 +62,7 @@ def build_cache_from_gromacs(
     topology_path, trajectory_path = _validated_paths(source)
     summary = inspect_gromacs_source(source)
     root = cache_root.resolve() if cache_root is not None else cache_dir_for_source(trajectory_path)
-    if root.exists():
-        shutil.rmtree(root)
+    root, temporary_cache = prepare_cache_directory(root)
 
     trajectory_stat = trajectory_path.stat()
     store = BinaryTrajectoryStore.create(
@@ -78,6 +76,7 @@ def build_cache_from_gromacs(
         source_paths=source.paths,
         store_cells=summary.has_cell,
         progressive=True,
+        temporary_cache=temporary_cache,
     )
 
     universe = _open_universe(topology_path, trajectory_path)

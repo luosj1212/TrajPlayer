@@ -523,6 +523,7 @@ class TrajPlayerWindow(QMainWindow):
         self.store: BinaryTrajectoryStore | None = None
         self.streamer: FrameStreamer | None = None
         self.open_thread: TrajectoryOpenThread | None = None
+        self._pending_open_source: TrajectorySource | None = None
         self._retired_open_stores: dict[
             TrajectoryOpenThread, BinaryTrajectoryStore | None
         ] = {}
@@ -890,6 +891,16 @@ class TrajPlayerWindow(QMainWindow):
             self.show_error(f"File not found: {missing[0]}")
             return
         self.close_current_trajectory()
+        if self._retired_open_stores:
+            self._pending_open_source = source
+            self.set_loading_state(source)
+            self.info_label.setText("Waiting for the previous cache operation to stop")
+            self.status_bar.showMessage("Queued trajectory open; background I/O is stopping")
+            return
+        self._pending_open_source = None
+        self._start_trajectory_open(source)
+
+    def _start_trajectory_open(self, source: TrajectorySource) -> None:
         self.set_loading_state(source)
         thread = TrajectoryOpenThread(source)
         thread.progress.connect(
@@ -1030,6 +1041,14 @@ class TrajPlayerWindow(QMainWindow):
         if self.open_thread is thread and thread.preview_store is None:
             self.open_thread = None
         thread.deleteLater()
+        if (
+            self.open_thread is None
+            and not self._retired_open_stores
+            and self._pending_open_source is not None
+        ):
+            source = self._pending_open_source
+            self._pending_open_source = None
+            self._start_trajectory_open(source)
 
     def activate_trajectory(
         self,
@@ -1748,6 +1767,7 @@ class TrajPlayerWindow(QMainWindow):
         self.status_bar.showMessage("Error")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._pending_open_source = None
         self.close_current_trajectory()
         retired = tuple(self._retired_open_stores)
         for thread in retired:

@@ -97,8 +97,8 @@ def main() -> None:
                 errors.append(f"local machine path in {relative}: {forbidden}")
 
     init_source = (ROOT / "trajplayer" / "__init__.py").read_text(encoding="utf-8")
-    if re.search(r'__version__\s*=\s*"0\.1\.0a1"', init_source) is None:
-        errors.append("trajplayer.__version__ is not 0.1.0a1")
+    if re.search(r'__version__\s*=\s*"0\.1\.0a2"', init_source) is None:
+        errors.append("trajplayer.__version__ is not 0.1.0a2")
 
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
     for requirement in requirements:

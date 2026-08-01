@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,27 @@ from trajplayer.ase_cache import build_cache_from_ase, inspect_ase_source, open_
 
 
 class AseCacheTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows file locking regression")
+    def test_rebuild_while_cache_is_mapped_uses_temporary_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "locked.traj"
+            with Trajectory(str(source), "w") as traj:
+                traj.write(Atoms("H", positions=[[0.0, 0.0, 0.0]]))
+
+            first = build_cache_from_ase(source)
+            canonical_root = first.root
+            second = build_cache_from_ase(source)
+            temporary_root = second.root
+            try:
+                self.assertEqual(canonical_root, source.with_name(f"{source.name}.tpdata"))
+                self.assertNotEqual(temporary_root, canonical_root)
+                self.assertTrue(second.metadata["temporary_cache"])
+                self.assertTrue(canonical_root.exists())
+            finally:
+                second.close()
+                first.close()
+            self.assertFalse(temporary_root.exists())
+
     def test_build_cache_from_ase_traj_streams_to_float32_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "tiny.traj"

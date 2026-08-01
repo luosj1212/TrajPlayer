@@ -10,7 +10,12 @@ from typing import Callable, Protocol
 
 import numpy as np
 
-from .binary_store import BinaryTrajectoryStore, SourceIdentity, cache_dir_for_source
+from .binary_store import (
+    BinaryTrajectoryStore,
+    SourceIdentity,
+    cache_dir_for_source,
+    prepare_cache_directory,
+)
 from .trajectory_source import TrajectorySource
 
 
@@ -46,27 +51,33 @@ def open_random_access_session(
     *,
     status_callback: Callable[[str], None] | None = None,
 ) -> tuple[RandomAccessFrameReader, BinaryTrajectoryStore]:
-    root = cache_dir_for_source(source.trajectory_path).resolve()
-    store = _open_compatible_partial_store(source, root)
+    canonical_root = cache_dir_for_source(source.trajectory_path).resolve()
+    root = canonical_root
+    temporary_cache = False
+    store = _open_compatible_partial_store(source, canonical_root)
     if store is None:
-        if root.exists():
-            shutil.rmtree(root)
-        root.mkdir(parents=True, exist_ok=True)
+        root, temporary_cache = prepare_cache_directory(canonical_root)
 
     try:
         reader = _open_reader(source, root, status_callback=status_callback)
     except Exception:
         if store is not None:
             store.close()
+        if temporary_cache:
+            shutil.rmtree(root, ignore_errors=True)
         raise
 
     summary = reader.summary
     if store is not None and not _store_matches_summary(store, summary):
         store.close()
         reader.close()
-        shutil.rmtree(root)
-        root.mkdir(parents=True, exist_ok=True)
-        reader = _open_reader(source, root, status_callback=status_callback)
+        root, temporary_cache = prepare_cache_directory(canonical_root)
+        try:
+            reader = _open_reader(source, root, status_callback=status_callback)
+        except Exception:
+            if temporary_cache:
+                shutil.rmtree(root, ignore_errors=True)
+            raise
         summary = reader.summary
         store = None
 
@@ -84,6 +95,7 @@ def open_random_access_session(
             store_cells=summary.has_cell,
             progressive=True,
             random_access=True,
+            temporary_cache=temporary_cache,
         )
     return reader, store
 

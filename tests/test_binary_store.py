@@ -1,13 +1,51 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from trajplayer.binary_store import BinaryTrajectoryStore, cache_dir_for_source
+from trajplayer.binary_store import (
+    BinaryTrajectoryStore,
+    cache_dir_for_source,
+    prepare_cache_directory,
+)
 
 
 class BinaryTrajectoryStoreTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows file locking regression")
+    def test_locked_cache_directory_uses_temporary_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "locked.tpdata"
+            root.mkdir()
+            mapped = np.memmap(root / "atom_numbers.u16", dtype=np.uint16, mode="w+", shape=(2,))
+            try:
+                prepared, temporary = prepare_cache_directory(root)
+                self.assertTrue(temporary)
+                self.assertNotEqual(prepared, root)
+                self.assertTrue(root.exists())
+                self.assertTrue(prepared.exists())
+                prepared.rmdir()
+            finally:
+                mapped._mmap.close()
+
+    def test_temporary_store_removes_its_cache_on_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "session.tpdata"
+            store = BinaryTrajectoryStore.create(
+                root,
+                frame_count=1,
+                atom_numbers=np.array([6], dtype=np.uint16),
+                symbols=["C"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+                temporary_cache=True,
+            )
+            self.assertTrue(root.exists())
+            store.close()
+            self.assertFalse(root.exists())
+
     def test_store_reopens_positions_as_contiguous_float32_memmap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "sample.tpdata"

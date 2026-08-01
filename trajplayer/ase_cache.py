@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +10,7 @@ import numpy as np
 if TYPE_CHECKING:
     from ase import Atoms
 
-from .binary_store import BinaryTrajectoryStore, cache_dir_for_source
+from .binary_store import BinaryTrajectoryStore, cache_dir_for_source, prepare_cache_directory
 from .trajectory_source import TrajectorySource
 
 
@@ -112,8 +111,7 @@ def build_cache_from_ase(
     source_path = source_path.resolve()
     summary = inspect_ase_source(source_path)
     root = cache_root.resolve() if cache_root is not None else cache_dir_for_source(source_path)
-    if root.exists():
-        shutil.rmtree(root)
+    root, temporary_cache = prepare_cache_directory(root)
 
     stat = source_path.stat()
     store = BinaryTrajectoryStore.create(
@@ -126,6 +124,7 @@ def build_cache_from_ase(
         source_size=stat.st_size,
         store_cells=summary.has_cell,
         progressive=True,
+        temporary_cache=temporary_cache,
     )
 
     try:
