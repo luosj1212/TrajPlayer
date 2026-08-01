@@ -23,7 +23,10 @@ class AseCacheTests(unittest.TestCase):
             second = build_cache_from_ase(source)
             temporary_root = second.root
             try:
-                self.assertEqual(canonical_root, source.with_name(f"{source.name}.tpdata"))
+                self.assertEqual(
+                    canonical_root,
+                    source.with_name(f"{source.name}.tpdata").resolve(),
+                )
                 self.assertNotEqual(temporary_root, canonical_root)
                 self.assertTrue(second.metadata["temporary_cache"])
                 self.assertTrue(canonical_root.exists())
