@@ -1,104 +1,24 @@
 from __future__ import annotations
 
-import os
 import json
 import math
 import sys
 import threading
 import time
 import traceback
-import atexit
-import ctypes
 from pathlib import Path
 from typing import Iterable
 
-import numpy as np
-
-_DLL_DIR_HANDLES: list[object] = []
-_GPU_DRIVER_HANDLES: list[object] = []
-_TIMER_RESOLUTION_ENABLED = False
+from trajplayer.startup import initialize_runtime, report_numpy_import_error
 
 
-def install_error_log() -> None:
-    if getattr(sys, "frozen", False):
-        log_dir = Path(sys.executable).resolve().parent
-    else:
-        log_dir = Path(__file__).resolve().parent
+initialize_runtime()
 
-    try:
-        log_file = open(log_dir / "traj_player_error.log", "a", encoding="utf-8", buffering=1)
-    except OSError:
-        if os.name == "nt":
-            state_root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        elif sys.platform == "darwin":
-            state_root = Path.home() / "Library" / "Logs"
-        else:
-            state_root = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
-        log_dir = state_root / "TrajPlayer"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = open(log_dir / "traj_player_error.log", "a", encoding="utf-8", buffering=1)
-    sys.stdout = log_file
-    sys.stderr = log_file
-    print("\n[startup] TrajPlayer starting", flush=True)
-    print(f"[startup] executable={getattr(sys, 'executable', '')}", flush=True)
-    print(
-        f"[startup] frozen={getattr(sys, 'frozen', False)} meipass={getattr(sys, '_MEIPASS', '')}",
-        flush=True,
-    )
-
-    def _log_exception(exc_type, exc, tb):
-        traceback.print_exception(exc_type, exc, tb)
-
-    sys.excepthook = _log_exception
-
-
-def configure_dll_search_path() -> None:
-    if os.name != "nt":
-        return
-    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    for dll_dir in (base_dir, base_dir / "PySide6", base_dir / "shiboken6"):
-        if not dll_dir.exists():
-            continue
-        if hasattr(os, "add_dll_directory"):
-            try:
-                _DLL_DIR_HANDLES.append(os.add_dll_directory(str(dll_dir)))
-            except OSError:
-                pass
-        os.environ["PATH"] = str(dll_dir) + os.pathsep + os.environ.get("PATH", "")
-
-
-def prefer_high_performance_gpu() -> None:
-    if os.name == "nt":
-        for dll_name in ("nvapi64.dll", "nvapi.dll"):
-            try:
-                _GPU_DRIVER_HANDLES.append(ctypes.WinDLL(dll_name))
-                break
-            except OSError:
-                continue
-        return
-
-    if sys.platform.startswith("linux") and Path("/proc/driver/nvidia/gpus").exists():
-        os.environ.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
-        os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
-
-
-def enable_high_resolution_timers() -> None:
-    global _TIMER_RESOLUTION_ENABLED
-    if os.name != "nt" or _TIMER_RESOLUTION_ENABLED:
-        return
-    try:
-        result = ctypes.windll.winmm.timeBeginPeriod(1)
-    except Exception:
-        return
-    if result == 0:
-        _TIMER_RESOLUTION_ENABLED = True
-        atexit.register(lambda: ctypes.windll.winmm.timeEndPeriod(1))
-
-
-install_error_log()
-configure_dll_search_path()
-prefer_high_performance_gpu()
-enable_high_resolution_timers()
+try:
+    import numpy as np
+except Exception as exc:
+    report_numpy_import_error(exc)
+    raise SystemExit(1) from None
 
 from PySide6.QtCore import QSize, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QSurfaceFormat
@@ -1790,6 +1710,8 @@ class TrajPlayerWindow(QMainWindow):
 
 def main() -> None:
     cli_args = parse_cli_args(sys.argv[1:])
+    if cli_args.startup_smoke:
+        return
     benchmark_store: BinaryTrajectoryStore | None = None
     benchmark_label: Path | None = None
     benchmark_metrics: dict[str, object] = {}

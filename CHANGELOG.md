@@ -3,6 +3,15 @@
 All notable changes to TrajPlayer are documented here. The project follows
 [Semantic Versioning](https://semver.org/) once it reaches a stable release.
 
+## [0.1.0-alpha.3] - 2026-08-07
+
+### Fixed
+
+- Configured bundled NumPy and SciPy DLL directories before importing NumPy
+- Replaced the misleading NumPy source-tree traceback with an actionable damaged-package message
+- Disabled optional UPX packing to reduce interference from endpoint security software
+- Added native runtime-file validation and packaged executable smoke tests to Release CI
+
 ## [0.1.0-alpha.2] - 2026-08-01
 
 ### Fixed
@@ -25,5 +34,6 @@ All notable changes to TrajPlayer are documented here. The project follows
 - Windows x64 and Linux x86_64 portable packaging
 - Cross-platform tests, CI, release automation, and dependency license collection
 
+[0.1.0-alpha.3]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.1

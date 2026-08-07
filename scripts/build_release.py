@@ -6,6 +6,9 @@ import platform
 import shutil
 import subprocess
 import sys
+import tarfile
+import zipfile
+from fnmatch import fnmatch
 from pathlib import Path
 
 
@@ -17,6 +20,54 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.collect_licenses import collect_licenses  # noqa: E402
 from trajplayer import __display_version__  # noqa: E402
+
+
+def _portable_runtime_patterns(system: str) -> tuple[str, ...]:
+    if system == "Windows":
+        return (
+            "TrajPlayer/TrajPlayer.exe",
+            "TrajPlayer/_internal/python*.dll",
+            "TrajPlayer/_internal/numpy/_core/_multiarray_umath*.pyd",
+            "TrajPlayer/_internal/numpy.libs/*.dll",
+        )
+    if system == "Linux":
+        return (
+            "TrajPlayer/TrajPlayer",
+            "TrajPlayer/_internal/libpython3*.so*",
+            "TrajPlayer/_internal/numpy/_core/_multiarray_umath*.so",
+            "TrajPlayer/_internal/numpy.libs/*.so*",
+        )
+    raise SystemExit(f"Unsupported release platform: {system}")
+
+
+def _missing_patterns(members: set[str], patterns: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(pattern for pattern in patterns if not any(fnmatch(member, pattern) for member in members))
+
+
+def validate_portable_tree(app_dir: Path = APP_DIR, *, system: str | None = None) -> None:
+    system_name = system or platform.system()
+    dist_root = app_dir.parent
+    members = {
+        path.relative_to(dist_root).as_posix()
+        for path in app_dir.rglob("*")
+        if path.is_file()
+    }
+    missing = _missing_patterns(members, _portable_runtime_patterns(system_name))
+    if missing:
+        raise SystemExit(f"Portable runtime is incomplete; missing: {', '.join(missing)}")
+
+
+def validate_portable_archive(archive_path: Path, *, system: str | None = None) -> None:
+    system_name = system or platform.system()
+    if archive_path.suffix == ".zip":
+        with zipfile.ZipFile(archive_path) as archive:
+            members = {name.replace("\\", "/") for name in archive.namelist() if not name.endswith("/")}
+    else:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            members = {member.name.replace("\\", "/") for member in archive.getmembers() if member.isfile()}
+    missing = _missing_patterns(members, _portable_runtime_patterns(system_name))
+    if missing:
+        raise SystemExit(f"Portable archive is incomplete; missing: {', '.join(missing)}")
 
 
 def _platform_label() -> tuple[str, str, str]:
@@ -51,6 +102,8 @@ def build_release(*, skip_pyinstaller: bool = False) -> Path:
     if not APP_DIR.is_dir():
         raise SystemExit(f"PyInstaller output was not created: {APP_DIR}")
 
+    validate_portable_tree(APP_DIR, system=system)
+
     shutil.copy2(ROOT / "LICENSE", APP_DIR / "LICENSE")
     shutil.copy2(ROOT / "THIRD_PARTY_NOTICES.md", APP_DIR / "THIRD_PARTY_NOTICES.md")
     shutil.copy2(ROOT / "DISTRIBUTION_README.txt", APP_DIR / "DISTRIBUTION_README.txt")
@@ -68,6 +121,7 @@ def build_release(*, skip_pyinstaller: bool = False) -> Path:
             base_dir="TrajPlayer",
         )
     )
+    validate_portable_archive(created, system=system)
     digest = hashlib.sha256()
     with created.open("rb") as archive_file:
         for chunk in iter(lambda: archive_file.read(1024 * 1024), b""):

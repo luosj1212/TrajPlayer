@@ -8,6 +8,7 @@ class CliArgsTests(unittest.TestCase):
     def test_parse_benchmark_args(self) -> None:
         args = parse_cli_args(
             [
+                "--startup-smoke",
                 "--smoke-exit-ms=500",
                 "--benchmark-output=C:/tmp/out.json",
                 "--benchmark-root=C:/tmp/bench.tpdata",
@@ -21,6 +22,7 @@ class CliArgsTests(unittest.TestCase):
             ]
         )
 
+        self.assertTrue(args.startup_smoke)
         self.assertEqual(args.smoke_exit_ms, 500)
         self.assertEqual(args.benchmark_output, Path("C:/tmp/out.json"))
         self.assertEqual(args.benchmark_root, Path("C:/tmp/bench.tpdata"))

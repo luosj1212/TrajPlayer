@@ -31,9 +31,9 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         self.assertNotIn(".venv-linux/bin/python", source)
 
     def test_linux_runtime_does_not_modify_dll_search_path(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
-        function = source.split("def configure_dll_search_path() -> None:", 1)[1]
-        function = function.split("def enable_high_resolution_timers()", 1)[0]
+        source = Path("trajplayer/startup.py").read_text(encoding="utf-8")
+        function = source.split("def configure_dll_search_path(", 1)[1]
+        function = function.split("def missing_numpy_runtime_components(", 1)[0]
         self.assertIn('if os.name != "nt":', function)
         self.assertIn("return", function)
 

@@ -1,4 +1,4 @@
-TrajPlayer v0.1.0-alpha.2 distribution
+TrajPlayer v0.1.0-alpha.3 distribution
 
 Windows
 1. Extract the entire TrajPlayer folder from the zip archive.
@@ -12,6 +12,12 @@ Linux x86_64 (Ubuntu 22.04 or compatible)
 4. An OpenGL 3.3 capable graphics driver is required.
 
 The executable cannot run if it is sent or moved without its _internal folder.
+
+Windows NumPy startup error
+- Do not install Python or NumPy; they are already bundled.
+- Make sure _internal\numpy\_core\_multiarray_umath.cp310-win_amd64.pyd exists.
+- If it is missing, extract a fresh copy of the complete Release ZIP.
+- Check Windows Security > Protection history if the file disappears after extraction.
 
 Project and issue tracker
 https://github.com/luosj1212/TrajPlayer

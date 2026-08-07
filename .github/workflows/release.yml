@@ -55,6 +55,28 @@ jobs:
       - name: Build portable archive
         run: python scripts/build_release.py
 
+      - name: Smoke-test Windows portable runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist/TrajPlayer/TrajPlayer.exe" `
+            -ArgumentList "--startup-smoke" `
+            -WindowStyle Hidden `
+            -PassThru
+          if (-not $process.WaitForExit(30000)) {
+            Stop-Process -Id $process.Id -Force
+            throw "Portable TrajPlayer startup smoke test timed out."
+          }
+          if ($process.ExitCode -ne 0) {
+            Get-Content "dist/TrajPlayer/traj_player_error.log" -ErrorAction SilentlyContinue
+            throw "Portable TrajPlayer exited with code $($process.ExitCode)."
+          }
+
+      - name: Smoke-test Linux portable runtime
+        if: runner.os == 'Linux'
+        run: ./dist/TrajPlayer/TrajPlayer --startup-smoke
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:

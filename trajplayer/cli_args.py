@@ -7,6 +7,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class CliArgs:
     paths: list[Path]
+    startup_smoke: bool = False
     smoke_exit_ms: int | None = None
     benchmark_output: Path | None = None
     benchmark_root: Path | None = None
@@ -20,6 +21,7 @@ class CliArgs:
 
 def parse_cli_args(argv: list[str]) -> CliArgs:
     paths: list[Path] = []
+    startup_smoke = False
     smoke_exit_ms: int | None = None
     benchmark_output: Path | None = None
     benchmark_root: Path | None = None
@@ -31,7 +33,9 @@ def parse_cli_args(argv: list[str]) -> CliArgs:
     benchmark_mode = "ball_stick"
 
     for arg in argv:
-        if arg.startswith("--smoke-exit-ms="):
+        if arg == "--startup-smoke":
+            startup_smoke = True
+        elif arg.startswith("--smoke-exit-ms="):
             smoke_exit_ms = max(0, int(arg.split("=", 1)[1]))
         elif arg.startswith("--benchmark-output="):
             benchmark_output = Path(arg.split("=", 1)[1])
@@ -54,6 +58,7 @@ def parse_cli_args(argv: list[str]) -> CliArgs:
 
     return CliArgs(
         paths=paths,
+        startup_smoke=startup_smoke,
         smoke_exit_ms=smoke_exit_ms,
         benchmark_output=benchmark_output,
         benchmark_root=benchmark_root,

@@ -55,7 +55,7 @@ are different from the source archive offered by **Code > Download ZIP**.
 ### Windows Portable Package
 
 1. Open GitHub Releases and download
-   `TrajPlayer-Windows-x64-v0.1.0-alpha.2.zip`, not the source-code ZIP.
+   `TrajPlayer-Windows-x64-v0.1.0-alpha.3.zip`, not the source-code ZIP.
 2. Extract the archive completely.
 3. Run `TrajPlayer\TrajPlayer.exe` from the extracted directory.
 4. Use **Open** or drag trajectory files into the application window.
@@ -64,9 +64,16 @@ Python and Conda are not required. Keep the `_internal` directory beside
 `TrajPlayer.exe`; copying or sharing the executable by itself will prevent the
 application from starting.
 
+If startup reports that NumPy cannot be imported, do not install Python or
+NumPy. Confirm that
+`TrajPlayer\_internal\numpy\_core\_multiarray_umath.cp310-win_amd64.pyd`
+exists. If it is missing, download the Release ZIP again, extract it before
+running the application, and check **Windows Security > Protection history**
+for a quarantined file. The `.sha256` asset can be used to verify the download.
+
 ### Linux Portable Package
 
-Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.2.tar.gz` from GitHub Releases
+Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.3.tar.gz` from GitHub Releases
 and extract the complete archive. Python is not required. Then run:
 
 ```bash

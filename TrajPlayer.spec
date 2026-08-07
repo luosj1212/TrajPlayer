@@ -35,6 +35,8 @@ a = Analysis(
         ('THIRD_PARTY_NOTICES.md', '.'),
     ],
     hiddenimports=[
+        'numpy._core._multiarray_umath',
+        'numpy._core._multiarray_tests',
         'ase.io.trajectory',
         'ase.io.xyz',
         'ase.io.extxyz',
@@ -98,7 +100,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -111,7 +113,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='TrajPlayer',
 )
