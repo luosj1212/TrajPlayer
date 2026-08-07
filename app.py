@@ -393,11 +393,18 @@ class BondInferenceThread(QThread):
     ready = Signal(int, object, object, object, float)
     failed = Signal(int, str)
 
-    def __init__(self, generation: int, positions: np.ndarray, atom_numbers: np.ndarray) -> None:
+    def __init__(
+        self,
+        generation: int,
+        positions: np.ndarray,
+        atom_numbers: np.ndarray,
+        cell: np.ndarray | None,
+    ) -> None:
         super().__init__()
         self.generation = int(generation)
         self.positions = np.ascontiguousarray(positions, dtype=np.float32)
         self.atom_numbers = np.ascontiguousarray(atom_numbers, dtype=np.uint16)
+        self.cell = None if cell is None else np.ascontiguousarray(cell, dtype=np.float32)
 
     def run(self) -> None:
         start = time.perf_counter()
@@ -405,6 +412,7 @@ class BondInferenceThread(QThread):
             bonds = infer_bonds(
                 self.positions,
                 self.atom_numbers,
+                cell=self.cell,
                 cancelled=lambda: self.isInterruptionRequested(),
             )
             if self.isInterruptionRequested():
@@ -1176,7 +1184,11 @@ class TrajPlayerWindow(QMainWindow):
             atom_index = self.filter_value_slider.value() - 1
             visible_atoms = np.array([atom_index], dtype=np.int32)
             message = f"Showing atom {atom_index + 1}"
-        self.gl_view.set_visible_atoms(visible_atoms, fit_view=self.displayed_frame >= 0)
+        self.gl_view.set_visible_atoms(
+            visible_atoms,
+            fit_view=self.displayed_frame >= 0,
+            unwrap_periodic=mode == "chain",
+        )
         self.status_bar.showMessage(message)
 
     def start_bond_inference(self, store: BinaryTrajectoryStore) -> None:
@@ -1189,7 +1201,13 @@ class TrajPlayerWindow(QMainWindow):
 
         first_frame = np.ascontiguousarray(store.frame(0), dtype=np.float32)
         atom_numbers = np.ascontiguousarray(store.atom_numbers, dtype=np.uint16)
-        thread = BondInferenceThread(self.trajectory_generation, first_frame, atom_numbers)
+        cell = store.cell(0)
+        thread = BondInferenceThread(
+            self.trajectory_generation,
+            first_frame,
+            atom_numbers,
+            cell,
+        )
         thread.ready.connect(self.on_bonds_ready)
         thread.failed.connect(self.on_bonds_failed)
         thread.finished.connect(lambda thread=thread: self.on_bond_thread_finished(thread))

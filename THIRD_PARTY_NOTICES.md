@@ -3,7 +3,7 @@
 TrajPlayer is MIT-licensed software built with the following third-party
 projects. Each project remains subject to its own license.
 
-| Component | Version used for v0.1.0-alpha.3 | License |
+| Component | Version used for v0.1.0-alpha.4 | License |
 | --- | ---: | --- |
 | [Atomic Simulation Environment](https://ase-lib.org/) | 3.27.0 | LGPL-2.1-or-later |
 | [MDAnalysis](https://www.mdanalysis.org/) | 2.9.0 | LGPL-3.0-or-later |

@@ -127,6 +127,117 @@ def cell_box_vertices(cell: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(vertices, dtype=np.float32)
 
 
+def periodic_cell_inverse_columns(cell: np.ndarray) -> np.ndarray | None:
+    matrix = np.asarray(cell, dtype=np.float64)
+    if matrix.shape != (3, 3):
+        raise ValueError("cell must have shape (3, 3)")
+    if not np.all(np.isfinite(matrix)):
+        return None
+    if np.min(np.linalg.norm(matrix, axis=1)) <= 1.0e-8:
+        return None
+    if abs(float(np.linalg.det(matrix))) <= 1.0e-8:
+        return None
+    inverse = np.linalg.inv(matrix)
+    return np.ascontiguousarray(inverse.T, dtype=np.float32)
+
+
+def minimum_image_displacements(
+    displacements: np.ndarray,
+    cell: np.ndarray,
+    *,
+    inverse_columns: np.ndarray | None = None,
+) -> np.ndarray:
+    delta = np.asarray(displacements, dtype=np.float32)
+    if delta.ndim < 1 or delta.shape[-1] != 3:
+        raise ValueError("displacements must end with three Cartesian coordinates")
+    matrix = np.asarray(cell, dtype=np.float32)
+    inverse = (
+        periodic_cell_inverse_columns(matrix)
+        if inverse_columns is None
+        else np.asarray(inverse_columns, dtype=np.float32)
+    )
+    if inverse is None:
+        return np.ascontiguousarray(delta, dtype=np.float32)
+    if inverse.shape != (3, 3):
+        raise ValueError("inverse_columns must have shape (3, 3)")
+    fractional = delta @ inverse.T
+    fractional -= np.rint(fractional)
+    wrapped = fractional @ matrix
+    return np.ascontiguousarray(wrapped, dtype=np.float32)
+
+
+def periodic_anchor_index(
+    positions: np.ndarray,
+    atom_indices: np.ndarray,
+    cell: np.ndarray,
+    *,
+    inverse_columns: np.ndarray | None = None,
+) -> int:
+    frame = np.asarray(positions, dtype=np.float32)
+    indices = np.asarray(atom_indices, dtype=np.int32)
+    if frame.ndim != 2 or frame.shape[1] != 3:
+        raise ValueError("positions must have shape (N, 3)")
+    if indices.ndim != 1 or indices.size == 0:
+        raise ValueError("atom_indices must be a non-empty 1D array")
+    matrix = np.asarray(cell, dtype=np.float32)
+    inverse = (
+        periodic_cell_inverse_columns(matrix)
+        if inverse_columns is None
+        else np.asarray(inverse_columns, dtype=np.float32)
+    )
+    if inverse is None:
+        return int(indices[0])
+    if inverse.shape != (3, 3):
+        raise ValueError("inverse_columns must have shape (3, 3)")
+
+    fractional = frame[indices] @ inverse.T
+    angles = fractional * np.float32(2.0 * math.pi)
+    circular_center = np.arctan2(
+        np.mean(np.sin(angles), axis=0),
+        np.mean(np.cos(angles), axis=0),
+    ) / np.float32(2.0 * math.pi)
+    relative_fractional = fractional - circular_center.astype(np.float32)
+    relative_fractional -= np.rint(relative_fractional)
+    relative_cartesian = relative_fractional @ matrix
+    distances2 = np.einsum(
+        "ij,ij->i",
+        relative_cartesian,
+        relative_cartesian,
+        dtype=np.float32,
+    )
+    return int(indices[int(np.argmin(distances2))])
+
+
+def unwrap_positions_around_anchor(
+    positions: np.ndarray,
+    atom_indices: np.ndarray,
+    anchor_index: int,
+    display_anchor: np.ndarray,
+    cell: np.ndarray,
+    *,
+    inverse_columns: np.ndarray | None = None,
+) -> np.ndarray:
+    frame = np.asarray(positions, dtype=np.float32)
+    indices = np.asarray(atom_indices, dtype=np.int32)
+    if frame.ndim != 2 or frame.shape[1] != 3:
+        raise ValueError("positions must have shape (N, 3)")
+    if indices.ndim != 1 or indices.size == 0:
+        raise ValueError("atom_indices must be a non-empty 1D array")
+    anchor = int(anchor_index)
+    if anchor < 0 or anchor >= frame.shape[0]:
+        raise ValueError("anchor_index is outside the position array")
+    target_anchor = np.asarray(display_anchor, dtype=np.float32)
+    if target_anchor.shape != (3,):
+        raise ValueError("display_anchor must have shape (3,)")
+    displacements = frame[indices] - frame[anchor]
+    local_positions = minimum_image_displacements(
+        displacements,
+        cell,
+        inverse_columns=inverse_columns,
+    )
+    return np.ascontiguousarray(target_anchor + local_positions, dtype=np.float32)
+
+
 def bond_segment_endpoints_for_frame(
     positions: np.ndarray, bond_pairs: np.ndarray, atom_radii: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -170,6 +281,15 @@ uniform mat4 u_view;
 uniform mat4 u_proj;
 uniform samplerBuffer u_positions;
 uniform float u_atom_size_scale;
+uniform int u_has_periodic_cell;
+uniform int u_unwrap_anchor_index;
+uniform vec3 u_unwrap_display_anchor;
+uniform vec3 u_cell_a;
+uniform vec3 u_cell_b;
+uniform vec3 u_cell_c;
+uniform vec3 u_inv_cell_0;
+uniform vec3 u_inv_cell_1;
+uniform vec3 u_inv_cell_2;
 
 const float MIN_RADIUS_NDC_X = {MIN_ATOM_RADIUS_NDC_X:.8f};
 
@@ -187,6 +307,25 @@ vec3 position_at(int atom_index) {{
     );
 }}
 
+vec3 minimum_image_delta(vec3 delta) {{
+    vec3 fractional = vec3(
+        dot(delta, u_inv_cell_0),
+        dot(delta, u_inv_cell_1),
+        dot(delta, u_inv_cell_2)
+    );
+    fractional -= round(fractional);
+    return u_cell_a * fractional.x + u_cell_b * fractional.y + u_cell_c * fractional.z;
+}}
+
+vec3 display_position(int atom_index) {{
+    vec3 position = position_at(atom_index);
+    if (u_has_periodic_cell == 0 || u_unwrap_anchor_index < 0) {{
+        return position;
+    }}
+    vec3 anchor = position_at(u_unwrap_anchor_index);
+    return u_unwrap_display_anchor + minimum_image_delta(position - anchor);
+}}
+
 vec2 corner_from_vertex_id() {{
     int id = gl_VertexID & 3;
     float x = (id == 1 || id == 3) ? 1.0 : -1.0;
@@ -196,7 +335,7 @@ vec2 corner_from_vertex_id() {{
 
 void main() {{
     vec2 corner = corner_from_vertex_id();
-    vec3 atom_position = position_at(int(a_atom_index + 0.5));
+    vec3 atom_position = display_position(int(a_atom_index + 0.5));
     vec4 center = u_view * vec4(atom_position, 1.0);
     float radius = max(a_radius * u_atom_size_scale, 0.001);
     vec4 clip_center = u_proj * center;
@@ -270,6 +409,15 @@ uniform samplerBuffer u_positions;
 uniform float u_atom_size_scale;
 uniform float u_bond_size_scale;
 uniform float u_endpoint_radius_scale;
+uniform int u_has_periodic_cell;
+uniform int u_unwrap_anchor_index;
+uniform vec3 u_unwrap_display_anchor;
+uniform vec3 u_cell_a;
+uniform vec3 u_cell_b;
+uniform vec3 u_cell_c;
+uniform vec3 u_inv_cell_0;
+uniform vec3 u_inv_cell_1;
+uniform vec3 u_inv_cell_2;
 
 const float BOND_RADIUS_SCALE = {BOND_RADIUS_SCALE:.8f};
 const float MIN_BOND_RADIUS_NDC_X = {MIN_BOND_RADIUS_NDC_X:.8f};
@@ -289,14 +437,37 @@ vec3 position_at(int atom_index) {{
     );
 }}
 
+vec3 minimum_image_delta(vec3 delta) {{
+    if (u_has_periodic_cell == 0) {{
+        return delta;
+    }}
+    vec3 fractional = vec3(
+        dot(delta, u_inv_cell_0),
+        dot(delta, u_inv_cell_1),
+        dot(delta, u_inv_cell_2)
+    );
+    fractional -= round(fractional);
+    return u_cell_a * fractional.x + u_cell_b * fractional.y + u_cell_c * fractional.z;
+}}
+
+vec3 display_position(int atom_index) {{
+    vec3 position = position_at(atom_index);
+    if (u_has_periodic_cell == 0 || u_unwrap_anchor_index < 0) {{
+        return position;
+    }}
+    vec3 anchor = position_at(u_unwrap_anchor_index);
+    return u_unwrap_display_anchor + minimum_image_delta(position - anchor);
+}}
+
 void main() {{
     int id = gl_VertexID & 3;
     float along = (id == 1 || id == 3) ? 1.0 : 0.0;
     float side = (id >= 2) ? 1.0 : -1.0;
 
-    vec3 source = position_at(int(a_bond_data.x + 0.5));
-    vec3 other = position_at(int(a_bond_data.y + 0.5));
-    vec3 delta = other - source;
+    vec3 source = display_position(int(a_bond_data.x + 0.5));
+    vec3 other = display_position(int(a_bond_data.y + 0.5));
+    vec3 delta = minimum_image_delta(other - source);
+    other = source + delta;
     float bond_length = length(delta);
     vec3 direction = bond_length > 0.000001 ? delta / bond_length : vec3(1.0, 0.0, 0.0);
     float source_offset = min(
@@ -430,12 +601,22 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._loc_proj = -1
         self._loc_positions = -1
         self._loc_atom_size_scale = -1
+        self._loc_has_periodic_cell = -1
+        self._loc_unwrap_anchor_index = -1
+        self._loc_unwrap_display_anchor = -1
+        self._loc_cell_vectors = (-1, -1, -1)
+        self._loc_inverse_columns = (-1, -1, -1)
         self._bond_loc_view = -1
         self._bond_loc_proj = -1
         self._bond_loc_positions = -1
         self._bond_loc_atom_size_scale = -1
         self._bond_loc_bond_size_scale = -1
         self._bond_loc_endpoint_radius_scale = -1
+        self._bond_loc_has_periodic_cell = -1
+        self._bond_loc_unwrap_anchor_index = -1
+        self._bond_loc_unwrap_display_anchor = -1
+        self._bond_loc_cell_vectors = (-1, -1, -1)
+        self._bond_loc_inverse_columns = (-1, -1, -1)
         self._box_loc_view = -1
         self._box_loc_proj = -1
         self._viewport_size = (1, 1)
@@ -458,14 +639,18 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._frame_upload_pending = True
         self._box_enabled = True
         self._box_has_cell = False
+        self._periodic_cell_valid = False
         self._box_vertex_count = 0
         self._box_cell = np.empty((0, 3), dtype=np.float32)
+        self._cell_inverse_columns = np.empty((0, 3), dtype=np.float32)
         self._box_vertices = np.empty((0, 3), dtype=np.float32)
         self._box_buffer_dirty = True
         self._bond_pairs = np.empty((0, 2), dtype=np.int32)
         self._bond_instance_count = 0
         self._bond_instance_data = np.empty((0, 4), dtype=np.float32)
         self._bond_instance_colors = np.empty((0, 6), dtype=np.float32)
+        self._unwrap_anchor_index = -1
+        self._unwrap_display_anchor = np.zeros(3, dtype=np.float32)
         self._render_mode = RENDER_MODE_BALL_STICK
         self._show_atoms = True
         self._show_bonds = True
@@ -521,6 +706,8 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._radii = self._radii_for_render_mode(self._render_mode)
         self._colors = colors
         self._positions = np.zeros((self._atom_count, 3), dtype=np.float32)
+        self._unwrap_anchor_index = -1
+        self._unwrap_display_anchor.fill(0.0)
         self._set_visible_atom_arrays(np.arange(self._atom_count, dtype=np.int32))
         self._positions_uploaded = False
         self._frame_upload_pending = True
@@ -593,7 +780,13 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._bond_size_scale = value
         self.update()
 
-    def set_visible_atoms(self, atom_indices: np.ndarray | None, *, fit_view: bool = True) -> None:
+    def set_visible_atoms(
+        self,
+        atom_indices: np.ndarray | None,
+        *,
+        fit_view: bool = True,
+        unwrap_periodic: bool = False,
+    ) -> None:
         if atom_indices is None:
             indices = np.arange(self._atom_count, dtype=np.int32)
         else:
@@ -605,6 +798,23 @@ class MoleculeGLWidget(QOpenGLWidget):
             if int(indices.min()) < 0 or int(indices.max()) >= self._atom_count:
                 raise ValueError("atom_indices contains an index outside the current atom array")
             indices = np.unique(indices)
+        self._unwrap_anchor_index = -1
+        if unwrap_periodic and indices.size > 1:
+            self._unwrap_anchor_index = (
+                periodic_anchor_index(
+                    self._positions,
+                    indices,
+                    self._box_cell,
+                    inverse_columns=self._cell_inverse_columns,
+                )
+                if self._periodic_cell_valid
+                else int(indices[0])
+            )
+        if self._unwrap_anchor_index >= 0:
+            np.copyto(
+                self._unwrap_display_anchor,
+                self._positions[self._unwrap_anchor_index],
+            )
         self._set_visible_atom_arrays(np.ascontiguousarray(indices, dtype=np.int32))
         self._rebuild_visible_bonds()
         if fit_view and self._positions.size:
@@ -631,7 +841,9 @@ class MoleculeGLWidget(QOpenGLWidget):
             if not self._box_has_cell:
                 return
             self._box_has_cell = False
+            self._periodic_cell_valid = False
             self._box_cell = np.empty((0, 3), dtype=np.float32)
+            self._cell_inverse_columns = np.empty((0, 3), dtype=np.float32)
             self._box_vertices = np.empty((0, 3), dtype=np.float32)
         else:
             matrix = np.ascontiguousarray(cell, dtype=np.float32)
@@ -641,6 +853,13 @@ class MoleculeGLWidget(QOpenGLWidget):
                 return
             self._box_has_cell = bool(np.any(matrix))
             self._box_cell = matrix
+            inverse_columns = periodic_cell_inverse_columns(matrix)
+            self._periodic_cell_valid = inverse_columns is not None
+            self._cell_inverse_columns = (
+                inverse_columns
+                if inverse_columns is not None
+                else np.empty((0, 3), dtype=np.float32)
+            )
             self._box_vertices = cell_box_vertices(matrix) if self._box_has_cell else np.empty((0, 3), dtype=np.float32)
         self._box_vertex_count = int(self._box_vertices.shape[0]) if self._box_enabled and self._box_has_cell else 0
         self._box_buffer_dirty = True
@@ -667,11 +886,11 @@ class MoleculeGLWidget(QOpenGLWidget):
         frame = np.asarray(positions, dtype=np.float32)
         if frame.shape != (self._atom_count, 3):
             raise ValueError(f"Expected frame shape {(self._atom_count, 3)}, got {frame.shape}")
+        self.set_cell(cell)
         if self._positions.shape != frame.shape:
             self._positions = np.empty(frame.shape, dtype=np.float32)
         np.copyto(self._positions, frame)
         self._frame_upload_pending = True
-        self.set_cell(cell)
         if reset_view:
             self._fit_camera_to_frame(
                 self._visible_positions(),
@@ -730,8 +949,32 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._loc_proj = self._program.uniformLocation("u_proj")
         self._loc_positions = self._program.uniformLocation("u_positions")
         self._loc_atom_size_scale = self._program.uniformLocation("u_atom_size_scale")
-        if self._loc_atom_size_scale < 0:
-            raise RuntimeError("Atom size shader uniform is unavailable")
+        self._loc_has_periodic_cell = self._program.uniformLocation(
+            "u_has_periodic_cell"
+        )
+        self._loc_unwrap_anchor_index = self._program.uniformLocation(
+            "u_unwrap_anchor_index"
+        )
+        self._loc_unwrap_display_anchor = self._program.uniformLocation(
+            "u_unwrap_display_anchor"
+        )
+        self._loc_cell_vectors = tuple(
+            self._program.uniformLocation(name)
+            for name in ("u_cell_a", "u_cell_b", "u_cell_c")
+        )
+        self._loc_inverse_columns = tuple(
+            self._program.uniformLocation(name)
+            for name in ("u_inv_cell_0", "u_inv_cell_1", "u_inv_cell_2")
+        )
+        if min(
+            self._loc_atom_size_scale,
+            self._loc_has_periodic_cell,
+            self._loc_unwrap_anchor_index,
+            self._loc_unwrap_display_anchor,
+            *self._loc_cell_vectors,
+            *self._loc_inverse_columns,
+        ) < 0:
+            raise RuntimeError("Atom shader uniforms are unavailable")
 
         self._bond_program = QOpenGLShaderProgram(self)
         if not self._bond_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Vertex, BOND_VERTEX_SHADER):
@@ -748,12 +991,34 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._bond_loc_endpoint_radius_scale = self._bond_program.uniformLocation(
             "u_endpoint_radius_scale"
         )
+        self._bond_loc_has_periodic_cell = self._bond_program.uniformLocation(
+            "u_has_periodic_cell"
+        )
+        self._bond_loc_unwrap_anchor_index = self._bond_program.uniformLocation(
+            "u_unwrap_anchor_index"
+        )
+        self._bond_loc_unwrap_display_anchor = self._bond_program.uniformLocation(
+            "u_unwrap_display_anchor"
+        )
+        self._bond_loc_cell_vectors = tuple(
+            self._bond_program.uniformLocation(name)
+            for name in ("u_cell_a", "u_cell_b", "u_cell_c")
+        )
+        self._bond_loc_inverse_columns = tuple(
+            self._bond_program.uniformLocation(name)
+            for name in ("u_inv_cell_0", "u_inv_cell_1", "u_inv_cell_2")
+        )
         if min(
             self._bond_loc_atom_size_scale,
             self._bond_loc_bond_size_scale,
             self._bond_loc_endpoint_radius_scale,
+            self._bond_loc_has_periodic_cell,
+            self._bond_loc_unwrap_anchor_index,
+            self._bond_loc_unwrap_display_anchor,
+            *self._bond_loc_cell_vectors,
+            *self._bond_loc_inverse_columns,
         ) < 0:
-            raise RuntimeError("Bond size shader uniforms are unavailable")
+            raise RuntimeError("Bond shader uniforms are unavailable")
 
         self._box_program = QOpenGLShaderProgram(self)
         if not self._box_program.addShaderFromSourceCode(QOpenGLShader.ShaderTypeBit.Vertex, BOX_VERTEX_SHADER):
@@ -859,6 +1124,14 @@ class MoleculeGLWidget(QOpenGLWidget):
             self._program.setUniformValue(self._loc_proj, proj)
             self._program.setUniformValue(self._loc_positions, 0)
             self._gl.glUniform1f(self._loc_atom_size_scale, self.effective_atom_size_scale)
+            self._set_periodic_uniforms(
+                self._program,
+                has_cell_location=self._loc_has_periodic_cell,
+                anchor_index_location=self._loc_unwrap_anchor_index,
+                display_anchor_location=self._loc_unwrap_display_anchor,
+                cell_locations=self._loc_cell_vectors,
+                inverse_locations=self._loc_inverse_columns,
+            )
             self._gl.glActiveTexture(GL_TEXTURE0)
             self._gl.glBindTexture(GL_TEXTURE_BUFFER, self._position_texture.textureId())
             self._vao.bind()
@@ -883,6 +1156,14 @@ class MoleculeGLWidget(QOpenGLWidget):
                 self._bond_loc_endpoint_radius_scale,
                 endpoint_scale,
             )
+            self._set_periodic_uniforms(
+                self._bond_program,
+                has_cell_location=self._bond_loc_has_periodic_cell,
+                anchor_index_location=self._bond_loc_unwrap_anchor_index,
+                display_anchor_location=self._bond_loc_unwrap_display_anchor,
+                cell_locations=self._bond_loc_cell_vectors,
+                inverse_locations=self._bond_loc_inverse_columns,
+            )
             self._gl.glActiveTexture(GL_TEXTURE0)
             self._gl.glBindTexture(GL_TEXTURE_BUFFER, self._position_texture.textureId())
             self._bond_vao.bind()
@@ -899,6 +1180,42 @@ class MoleculeGLWidget(QOpenGLWidget):
                 upload_ms=self._last_upload_ms,
                 draw_calls=draw_calls,
                 timestamp_s=paint_start,
+            )
+
+    def _set_periodic_uniforms(
+        self,
+        program: QOpenGLShaderProgram,
+        *,
+        has_cell_location: int,
+        anchor_index_location: int,
+        display_anchor_location: int,
+        cell_locations: tuple[int, int, int],
+        inverse_locations: tuple[int, int, int],
+    ) -> None:
+        has_periodic_cell = self._periodic_cell_valid
+        anchor_index = self._unwrap_anchor_index if has_periodic_cell else -1
+        self._gl.glUniform1i(has_cell_location, int(has_periodic_cell))
+        self._gl.glUniform1i(anchor_index_location, int(anchor_index))
+        anchor = self._unwrap_display_anchor
+        program.setUniformValue(
+            display_anchor_location,
+            QVector3D(float(anchor[0]), float(anchor[1]), float(anchor[2])),
+        )
+        if not has_periodic_cell:
+            return
+        for location, vector in zip(cell_locations, self._box_cell, strict=True):
+            program.setUniformValue(
+                location,
+                QVector3D(float(vector[0]), float(vector[1]), float(vector[2])),
+            )
+        for location, vector in zip(
+            inverse_locations,
+            self._cell_inverse_columns,
+            strict=True,
+        ):
+            program.setUniformValue(
+                location,
+                QVector3D(float(vector[0]), float(vector[1]), float(vector[2])),
             )
 
     def resizeGL(self, width: int, height: int) -> None:  # type: ignore[override]
@@ -1096,7 +1413,7 @@ class MoleculeGLWidget(QOpenGLWidget):
                 ],
                 dtype=np.float32,
             )
-            view_depth = self._positions[indices] @ camera_forward
+            view_depth = self._display_positions(indices) @ camera_forward
             order = np.argsort(view_depth, kind="stable")[::-1]
             render_indices = indices[order]
         self._render_atom_indices = np.ascontiguousarray(render_indices, dtype=np.int32)
@@ -1131,10 +1448,27 @@ class MoleculeGLWidget(QOpenGLWidget):
             visible_pairs,
         ).reshape(bond_count, 6)
 
+    def _display_positions(self, indices: np.ndarray) -> np.ndarray:
+        anchor_index = self._unwrap_anchor_index
+        if (
+            anchor_index < 0
+            or not self._periodic_cell_valid
+            or indices.size <= 1
+        ):
+            if indices.size == self._atom_count:
+                return self._positions
+            return np.ascontiguousarray(self._positions[indices], dtype=np.float32)
+        return unwrap_positions_around_anchor(
+            self._positions,
+            indices,
+            anchor_index,
+            self._unwrap_display_anchor,
+            self._box_cell,
+            inverse_columns=self._cell_inverse_columns,
+        )
+
     def _visible_positions(self) -> np.ndarray:
-        if self._visible_atom_count == self._atom_count:
-            return self._positions
-        return np.ascontiguousarray(self._positions[self._visible_atom_indices], dtype=np.float32)
+        return self._display_positions(self._visible_atom_indices)
 
     def _reset_bonds(self) -> None:
         self._bond_pairs = np.empty((0, 2), dtype=np.int32)

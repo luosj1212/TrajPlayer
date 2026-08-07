@@ -88,6 +88,7 @@ def infer_bonds(
     positions: np.ndarray,
     atom_numbers: np.ndarray,
     *,
+    cell: np.ndarray | None = None,
     distance_scale: float = BOND_DISTANCE_SCALE,
     min_distance: float = MIN_BOND_DISTANCE,
     cancelled: Callable[[], bool] | None = None,
@@ -111,6 +112,7 @@ def infer_bonds(
         frame,
         radii,
         caps,
+        cell=_periodic_cell_or_none(cell),
         distance_scale=float(distance_scale),
         min_distance=float(min_distance),
         cancelled=cancelled,
@@ -201,6 +203,7 @@ def _candidate_pairs(
     radii: np.ndarray,
     caps: np.ndarray,
     *,
+    cell: np.ndarray | None,
     distance_scale: float,
     min_distance: float,
     cancelled: Callable[[], bool] | None,
@@ -217,19 +220,29 @@ def _candidate_pairs(
         float(np.max(radii[active_indices]) * 2.0 * distance_scale),
         min_distance,
     )
-    tree = cKDTree(positions[active_indices], compact_nodes=True, balanced_tree=True)
-    local_pairs = tree.query_pairs(maximum_cutoff, output_type="ndarray")
-    if local_pairs.size == 0:
-        return _empty_candidates()
+    if cell is None:
+        tree = cKDTree(positions[active_indices], compact_nodes=True, balanced_tree=True)
+        local_pairs = tree.query_pairs(maximum_cutoff, output_type="ndarray")
+        if local_pairs.size == 0:
+            return _empty_candidates()
+        left = np.asarray(active_indices[local_pairs[:, 0]], dtype=np.int32)
+        right = np.asarray(active_indices[local_pairs[:, 1]], dtype=np.int32)
+        low = np.minimum(left, right)
+        high = np.maximum(left, right)
+        delta = positions[high] - positions[low]
+        distance2 = np.einsum("ij,ij->i", delta, delta, dtype=np.float32)
+    else:
+        distance2, low, high = _periodic_candidate_pairs(
+            positions,
+            active_indices,
+            cell,
+            maximum_cutoff,
+        )
+        if distance2.size == 0:
+            return _empty_candidates()
     if cancelled is not None and cancelled():
         return _empty_candidates()
 
-    left = np.asarray(active_indices[local_pairs[:, 0]], dtype=np.int32)
-    right = np.asarray(active_indices[local_pairs[:, 1]], dtype=np.int32)
-    low = np.minimum(left, right)
-    high = np.maximum(left, right)
-    delta = positions[high] - positions[low]
-    distance2 = np.einsum("ij,ij->i", delta, delta, dtype=np.float32)
     min_distance2 = float(min_distance * min_distance)
     cutoff = (radii[low] + radii[high]) * np.float32(distance_scale)
     accepted = (distance2 >= np.float32(min_distance2)) & (distance2 <= cutoff * cutoff)
@@ -237,6 +250,65 @@ def _candidate_pairs(
         np.ascontiguousarray(distance2[accepted], dtype=np.float32),
         np.ascontiguousarray(low[accepted], dtype=np.int32),
         np.ascontiguousarray(high[accepted], dtype=np.int32),
+    )
+
+
+def _periodic_cell_or_none(cell: np.ndarray | None) -> np.ndarray | None:
+    if cell is None:
+        return None
+    matrix = np.asarray(cell, dtype=np.float64)
+    if matrix.shape != (3, 3):
+        raise ValueError("cell must have shape (3, 3)")
+    if not np.all(np.isfinite(matrix)):
+        return None
+    if np.min(np.linalg.norm(matrix, axis=1)) <= 1.0e-8:
+        return None
+    if abs(float(np.linalg.det(matrix))) <= 1.0e-8:
+        return None
+    return np.ascontiguousarray(matrix, dtype=np.float64)
+
+
+def _periodic_candidate_pairs(
+    positions: np.ndarray,
+    active_indices: np.ndarray,
+    cell: np.ndarray,
+    maximum_cutoff: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    from ase.neighborlist import primitive_neighbor_list
+
+    active_positions = np.asarray(positions[active_indices], dtype=np.float64)
+    local_left, local_right, distances = primitive_neighbor_list(
+        "ijd",
+        np.ones(3, dtype=np.bool_),
+        cell,
+        active_positions,
+        float(maximum_cutoff),
+        self_interaction=False,
+    )
+    if local_left.size == 0:
+        return _empty_candidates()
+
+    left = np.asarray(active_indices[local_left], dtype=np.int32)
+    right = np.asarray(active_indices[local_right], dtype=np.int32)
+    low = np.minimum(left, right)
+    high = np.maximum(left, right)
+    keep = low < high
+    if not np.any(keep):
+        return _empty_candidates()
+    low = low[keep]
+    high = high[keep]
+    distance2 = np.square(np.asarray(distances[keep], dtype=np.float32))
+
+    order = np.lexsort((distance2, high, low))
+    low = low[order]
+    high = high[order]
+    distance2 = distance2[order]
+    unique = np.ones(low.shape[0], dtype=np.bool_)
+    unique[1:] = (low[1:] != low[:-1]) | (high[1:] != high[:-1])
+    return (
+        np.ascontiguousarray(distance2[unique], dtype=np.float32),
+        np.ascontiguousarray(low[unique], dtype=np.int32),
+        np.ascontiguousarray(high[unique], dtype=np.int32),
     )
 
 

@@ -16,6 +16,9 @@ class GlViewDefaultsTests(unittest.TestCase):
         self.assertIn("layout(location = 1) in float a_atom_index", gl_view.VERTEX_SHADER)
         self.assertIn("uniform samplerBuffer u_positions", gl_view.VERTEX_SHADER)
         self.assertIn("uniform float u_atom_size_scale", gl_view.VERTEX_SHADER)
+        self.assertIn("uniform int u_unwrap_anchor_index", gl_view.VERTEX_SHADER)
+        self.assertIn("display_position", gl_view.VERTEX_SHADER)
+        self.assertIn("minimum_image_delta", gl_view.VERTEX_SHADER)
         self.assertIn("texelFetch(u_positions", gl_view.VERTEX_SHADER)
         self.assertNotIn("layout(location = 0) in vec2 a_corner", gl_view.VERTEX_SHADER)
         self.assertIn("MIN_RADIUS_NDC_X", gl_view.VERTEX_SHADER)
@@ -65,6 +68,97 @@ class GlViewDefaultsTests(unittest.TestCase):
         np.testing.assert_array_equal(vertices[-1], np.array([2.0, 3.0, 4.0], dtype=np.float32))
         self.assertTrue(vertices.flags.c_contiguous)
 
+    def test_minimum_image_displacements_remove_periodic_box_spans(self) -> None:
+        cell = np.diag([10.0, 12.0, 14.0]).astype(np.float32)
+        displacements = np.array(
+            [
+                [9.1, 0.0, 0.0],
+                [-9.1, 0.0, 0.0],
+                [0.0, 11.2, -13.3],
+            ],
+            dtype=np.float32,
+        )
+
+        wrapped = gl_view.minimum_image_displacements(displacements, cell)
+
+        np.testing.assert_allclose(
+            wrapped,
+            [[-0.9, 0.0, 0.0], [0.9, 0.0, 0.0], [0.0, -0.8, 0.7]],
+            atol=1.0e-5,
+        )
+        self.assertTrue(wrapped.flags.c_contiguous)
+
+    def test_chain_positions_are_unwrapped_around_stable_anchor(self) -> None:
+        positions = np.array(
+            [
+                [0.2, 5.0, 5.0],
+                [9.3, 5.0, 5.0],
+                [0.8, 5.0, 5.0],
+            ],
+            dtype=np.float32,
+        )
+        indices = np.array([0, 1, 2], dtype=np.int32)
+        cell = np.diag([10.0, 10.0, 10.0]).astype(np.float32)
+
+        unwrapped = gl_view.unwrap_positions_around_anchor(
+            positions,
+            indices,
+            0,
+            np.array([4.0, 4.0, 4.0], dtype=np.float32),
+            cell,
+        )
+
+        np.testing.assert_allclose(
+            unwrapped,
+            [[4.0, 4.0, 4.0], [3.1, 4.0, 4.0], [4.6, 4.0, 4.0]],
+            atol=1.0e-5,
+        )
+
+    def test_periodic_anchor_is_selected_near_the_wrapped_chain_center(self) -> None:
+        positions = np.array(
+            [
+                [9.4, 5.0, 5.0],
+                [9.9, 5.0, 5.0],
+                [0.2, 5.0, 5.0],
+                [0.9, 5.0, 5.0],
+            ],
+            dtype=np.float32,
+        )
+        cell = np.diag([10.0, 10.0, 10.0]).astype(np.float32)
+
+        anchor = gl_view.periodic_anchor_index(
+            positions,
+            np.arange(4, dtype=np.int32),
+            cell,
+        )
+
+        self.assertEqual(anchor, 2)
+
+    def test_chain_anchor_stays_stable_when_raw_coordinates_wrap(self) -> None:
+        positions = np.array(
+            [
+                [9.8, 5.0, 5.0],
+                [8.9, 5.0, 5.0],
+                [0.4, 5.0, 5.0],
+            ],
+            dtype=np.float32,
+        )
+        cell = np.diag([10.0, 10.0, 10.0]).astype(np.float32)
+
+        unwrapped = gl_view.unwrap_positions_around_anchor(
+            positions,
+            np.arange(3, dtype=np.int32),
+            0,
+            np.array([0.2, 5.0, 5.0], dtype=np.float32),
+            cell,
+        )
+
+        np.testing.assert_allclose(
+            unwrapped,
+            [[0.2, 5.0, 5.0], [-0.7, 5.0, 5.0], [0.8, 5.0, 5.0]],
+            atol=1.0e-5,
+        )
+
     def test_bond_shader_uses_instanced_two_tone_sticks(self) -> None:
         self.assertIn("layout(location = 4) in vec4 a_bond_data", gl_view.BOND_VERTEX_SHADER)
         self.assertIn("layout(location = 5) in vec3 a_bond_color_a", gl_view.BOND_VERTEX_SHADER)
@@ -72,6 +166,11 @@ class GlViewDefaultsTests(unittest.TestCase):
         self.assertIn("uniform samplerBuffer u_positions", gl_view.BOND_VERTEX_SHADER)
         self.assertIn("uniform float u_bond_size_scale", gl_view.BOND_VERTEX_SHADER)
         self.assertIn("uniform float u_endpoint_radius_scale", gl_view.BOND_VERTEX_SHADER)
+        self.assertIn("uniform int u_has_periodic_cell", gl_view.BOND_VERTEX_SHADER)
+        self.assertIn("uniform int u_unwrap_anchor_index", gl_view.BOND_VERTEX_SHADER)
+        self.assertIn("minimum_image_delta", gl_view.BOND_VERTEX_SHADER)
+        self.assertIn("display_position", gl_view.BOND_VERTEX_SHADER)
+        self.assertIn("fractional -= round(fractional)", gl_view.BOND_VERTEX_SHADER)
         self.assertIn("texelFetch(u_positions", gl_view.BOND_VERTEX_SHADER)
         self.assertIn("MAX_ENDPOINT_LENGTH_FRACTION", gl_view.BOND_VERTEX_SHADER)
         self.assertIn("BOND_RADIUS_SCALE", gl_view.BOND_VERTEX_SHADER)
@@ -80,6 +179,7 @@ class GlViewDefaultsTests(unittest.TestCase):
         self.assertNotIn("BOND_COLOR", gl_view.BOND_VERTEX_SHADER)
         self.assertNotIn("_update_bond_segment_arrays", gl_view.MoleculeGLWidget._upload_frame_buffers.__code__.co_names)
         self.assertIn("glDrawArraysInstanced", gl_view.MoleculeGLWidget.paintGL.__code__.co_names)
+        self.assertIn("_set_periodic_uniforms", gl_view.MoleculeGLWidget.paintGL.__code__.co_names)
         self.assertEqual(gl_view.BOND_RADIUS_SCALE, 0.20)
         self.assertLessEqual(gl_view.MIN_BOND_RADIUS_NDC_X, 1.0e-5)
         self.assertIn("vec3(0.11)", gl_view.BOND_FRAGMENT_SHADER)

@@ -3,6 +3,18 @@
 All notable changes to TrajPlayer are documented here. The project follows
 [Semantic Versioning](https://semver.org/) once it reaches a stable release.
 
+## [0.1.0-alpha.4] - 2026-08-07
+
+### Fixed
+
+- Reassembled isolated chains across periodic boundaries with a stable,
+  center-near anchor computed when the filter changes
+- Applied minimum-image bond vectors in the GPU shader so wrapped coordinates
+  no longer produce box-spanning sticks
+- Included periodic neighbors during background bond inference
+- Kept per-frame rendering on the existing float32 VBO upload path without
+  adding per-atom CPU geometry work
+
 ## [0.1.0-alpha.3] - 2026-08-07
 
 ### Fixed
@@ -34,6 +46,7 @@ All notable changes to TrajPlayer are documented here. The project follows
 - Windows x64 and Linux x86_64 portable packaging
 - Cross-platform tests, CI, release automation, and dependency license collection
 
+[0.1.0-alpha.4]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.1

@@ -45,6 +45,23 @@ class BondInferenceTests(unittest.TestCase):
         self.assertEqual({tuple(pair) for pair in bonds.tolist()}, {(0, 1), (0, 2)})
         np.testing.assert_array_equal(valence_caps_for(atom_numbers), np.array([2, 1, 1, 1], dtype=np.uint8))
 
+    def test_periodic_inference_finds_bond_across_cell_boundary(self) -> None:
+        positions = np.array(
+            [
+                [0.2, 0.0, 0.0],
+                [9.3, 0.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+        atom_numbers = np.array([6, 1], dtype=np.uint16)
+        cell = np.diag([10.0, 10.0, 10.0]).astype(np.float32)
+
+        nonperiodic_bonds = infer_bonds(positions, atom_numbers)
+        periodic_bonds = infer_bonds(positions, atom_numbers, cell=cell)
+
+        self.assertEqual(nonperiodic_bonds.shape, (0, 2))
+        np.testing.assert_array_equal(periodic_bonds, np.array([[0, 1]], dtype=np.int32))
+
     def test_bond_segments_are_split_at_midpoint_and_colored_by_endpoint_atoms(self) -> None:
         positions = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=np.float32)
         bonds = np.array([[0, 1]], dtype=np.int32)
