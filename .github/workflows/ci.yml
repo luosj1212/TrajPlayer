@@ -48,12 +48,18 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
 
-      - name: Exercise a real GUI and OpenGL trajectory on Windows
+      # GitHub's hosted Windows desktop session has no OpenGL 3.3 context.
+      # Keep the Windows job responsible for imports/startup; Linux and macOS
+      # exercise two rendered OpenGL frames below.
+      - name: Exercise Windows application startup
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          python app.py --gui-smoke --gui-smoke-timeout-ms=20000 --gui-smoke-output=gui-smoke.json examples/c60.extxyz
-          Get-Content gui-smoke.json
+          python app.py --startup-smoke
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content "traj_player_error.log" -ErrorAction SilentlyContinue
+            throw "TrajPlayer source startup smoke test failed."
+          }
 
       - name: Exercise a real GUI and software OpenGL trajectory on Linux
         if: runner.os == 'Linux'
