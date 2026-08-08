@@ -43,8 +43,10 @@ continue in the specialized tools users already prefer.
 - Live slider scrubbing without waiting for mouse release
 - Sequential 1-60 FPS playback with no trajectory-frame skipping
 - Ball-stick, Ball, and Bond representations with adjustable radii
-- Periodic box display and connected-chain or individual-atom isolation
-- Portable Windows x64 and Linux x86_64 packages
+- Periodic box display and connected-chain or individual-atom isolation;
+  chain lists and ranges can be entered as `1,3-5`
+- Explicit bond-source status with optional static frame-1 inference
+- Portable Windows x64, Linux x86_64, and macOS Apple Silicon/Intel packages
 
 ## Downloads
 
@@ -55,7 +57,7 @@ are different from the source archive offered by **Code > Download ZIP**.
 ### Windows Portable Package
 
 1. Open GitHub Releases and download
-   `TrajPlayer-Windows-x64-v0.1.0-alpha.4.zip`, not the source-code ZIP.
+   `TrajPlayer-Windows-x64-v0.1.0-alpha.5.zip`, not the source-code ZIP.
 2. Extract the archive completely.
 3. Run `TrajPlayer\TrajPlayer.exe` from the extracted directory.
 4. Use **Open** or drag trajectory files into the application window.
@@ -71,9 +73,16 @@ exists. If it is missing, download the Release ZIP again, extract it before
 running the application, and check **Windows Security > Protection history**
 for a quarantined file. The `.sha256` asset can be used to verify the download.
 
+For a privacy-safe environment and graphics report, open PowerShell in the
+extracted `TrajPlayer` folder and run:
+
+```powershell
+.\TrajPlayer.exe --doctor-output=trajplayer-diagnostics.json
+```
+
 ### Linux Portable Package
 
-Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.4.tar.gz` from GitHub Releases
+Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.5.tar.gz` from GitHub Releases
 and extract the complete archive. Python is not required. Then run:
 
 ```bash
@@ -83,6 +92,32 @@ chmod +x TrajPlayer/TrajPlayer
 
 The portable build requires Linux x86_64, an OpenGL 3.3 capable GPU and driver,
 and the common Qt XCB runtime libraries listed under [Requirements](#requirements).
+Generate the same report with
+`./TrajPlayer/TrajPlayer --doctor-output=trajplayer-diagnostics.json`.
+
+### macOS Application
+
+Download the ZIP that matches the Mac:
+
+- Apple Silicon (M1 or newer):
+  `TrajPlayer-macOS-arm64-v0.1.0-alpha.5.zip`
+- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.5.zip`
+
+Extract the complete ZIP, then open `TrajPlayer-macOS/TrajPlayer.app`. Python
+and Conda are not required. The app can be moved to `/Applications` as a whole;
+do not move files out of the app bundle.
+
+The alpha builds are ad-hoc signed but not Apple-notarized. On first launch,
+macOS may say that it cannot verify the developer. Control-click
+`TrajPlayer.app`, choose **Open**, then confirm **Open**. TrajPlayer requires
+macOS 13 or newer and OpenGL 3.3.
+
+Generate a diagnostics report from Terminal with:
+
+```bash
+./TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer \
+  --doctor-output=trajplayer-diagnostics.json
+```
 
 ### Opening Trajectories
 
@@ -92,6 +127,8 @@ and the common Qt XCB runtime libraries listed under [Requirements](#requirement
   trajectory, or drag both files into the window together.
 - When a same-named GRO file is beside an XTC/TRR trajectory, TrajPlayer can
   also try to locate the topology when the trajectory is opened by itself.
+- On macOS, supported files can also be opened with `TrajPlayer.app` from
+  Finder; simultaneous file-open events are combined before loading.
 
 ## Supported Files
 
@@ -158,6 +195,21 @@ Try the included sample with:
 python -m trajplayer examples/c60.extxyz
 ```
 
+### macOS
+
+```bash
+git clone https://github.com/luosj1212/TrajPlayer.git
+cd TrajPlayer
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m trajplayer examples/c60.extxyz
+```
+
+Run `bash build_macos.sh` on a Mac to create the native package for that Mac's
+architecture.
+
 ## Architecture
 
 ```mermaid
@@ -172,7 +224,9 @@ flowchart LR
 The UI thread schedules work and submits ready GPU buffers. Trajectory I/O,
 indexing, cache population, and filter-buffer preparation remain off the UI
 thread. A sidecar cache grows on disk as frames are requested, while the RAM
-window remains bounded independently of total trajectory length.
+window remains bounded independently of total trajectory length. Rendering is
+event-driven while idle and wakes only for playback deadlines or newly ready
+frames.
 
 ## Reference Performance
 
@@ -201,7 +255,9 @@ Generated benchmark stores and reports are ignored by Git.
 
 - Python 3.10 or 3.11 when running from source
 - OpenGL 3.3 capable GPU and current graphics driver
-- Windows 10/11 x64, or Linux x86_64 with Qt XCB runtime libraries
+- Windows 10/11 x64
+- Linux x86_64 with Qt XCB runtime libraries
+- macOS 13 or newer on Apple Silicon or Intel
 
 On Ubuntu, missing Qt runtime libraries can usually be installed with:
 
@@ -213,7 +269,7 @@ sudo apt-get install libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 \
 
 ## Known Limitations
 
-- No macOS package yet
+- macOS alpha packages are not yet notarized with an Apple Developer ID
 - No ribbon, molecular surface, volume, label, or publication renderer
 - No built-in RMSD/RMSF analysis, measurements, scripting API, or video export
 - XTC/TRR requires a compatible GRO topology
@@ -225,6 +281,7 @@ sudo apt-get install libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 \
 python -m pip install -e ".[dev]"
 python -m pytest -q
 python scripts/check_release.py
+python scripts/doctor.py --output trajplayer-diagnostics.json
 ```
 
 Regenerate the README screenshot after UI changes with:

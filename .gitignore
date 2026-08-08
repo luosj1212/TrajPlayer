@@ -29,6 +29,7 @@ dist/
 *.nc
 
 # Local benchmarks, logs, and visual checks
+/artifacts/
 benchmark-*.json
 benchmark-*.png
 *-check.json

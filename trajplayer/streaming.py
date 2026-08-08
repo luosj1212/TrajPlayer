@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import traceback
 from collections.abc import Callable
 
 import numpy as np
@@ -24,6 +25,7 @@ class FrameStreamer:
         max_memory_bytes: int = DEFAULT_PREFETCH_MEMORY_BYTES,
         interactive_prefetch_frames: int = DEFAULT_INTERACTIVE_PREFETCH_FRAMES,
         frame_ready_callback: Callable[[int], None] | None = None,
+        error_callback: Callable[[BaseException], None] | None = None,
     ) -> None:
         if prefetch_radius < 0:
             raise ValueError("prefetch_radius must be non-negative")
@@ -48,6 +50,7 @@ class FrameStreamer:
             np.empty((self.capacity, 3, 3), dtype=np.float32) if store.has_cells else None
         )
         self._frame_ready_callback = frame_ready_callback
+        self._error_callback = error_callback
         self._lock = threading.RLock()
         self._ready = threading.Condition(self._lock)
         self._center = 0
@@ -58,6 +61,7 @@ class FrameStreamer:
         self._target_indices: tuple[int, ...] = ()
         self._target_set: set[int] = set()
         self._stop = False
+        self._error: BaseException | None = None
         self._thread: threading.Thread | None = None
         self._index_to_slot: dict[int, int] = {}
         self._slot_to_index: dict[int, int] = {}
@@ -67,21 +71,41 @@ class FrameStreamer:
         cell_bytes = 0 if self._cell_buffer is None else int(self._cell_buffer.nbytes)
         return int(self._buffer.nbytes) + cell_bytes
 
+    @property
+    def error(self) -> BaseException | None:
+        with self._lock:
+            return self._error
+
+    @property
+    def is_alive(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
     def start(self) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop = False
+            self._error = None
             self._thread = threading.Thread(target=self._run, name="FrameStreamer", daemon=True)
             self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, *, timeout_s: float = 2.0) -> bool:
         with self._ready:
             self._stop = True
             self._ready.notify_all()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-            self._thread = None
+            thread = self._thread
+        if thread is None:
+            return True
+        if thread is threading.current_thread():
+            return False
+        thread.join(timeout=max(0.0, float(timeout_s)))
+        stopped = not thread.is_alive()
+        if stopped:
+            with self._lock:
+                if self._thread is thread:
+                    self._thread = None
+        return stopped
 
     def seek(self, frame_index: int, *, direction: int = 0, interactive: bool = False) -> None:
         frame_index = max(0, min(int(frame_index), self.store.frame_count - 1))
@@ -197,6 +221,22 @@ class FrameStreamer:
             return target.issubset(self._index_to_slot)
 
     def _run(self) -> None:
+        try:
+            self._run_loop()
+        except Exception as exc:
+            with self._ready:
+                self._error = exc
+                self._stop = True
+                self._ready.notify_all()
+            traceback.print_exc()
+            callback = self._error_callback
+            if callback is not None:
+                try:
+                    callback(exc)
+                except Exception:
+                    traceback.print_exc()
+
+    def _run_loop(self) -> None:
         last_request_serial = -1
         while True:
             with self._ready:

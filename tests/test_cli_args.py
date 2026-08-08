@@ -9,6 +9,10 @@ class CliArgsTests(unittest.TestCase):
         args = parse_cli_args(
             [
                 "--startup-smoke",
+                "--gui-smoke",
+                "--gui-smoke-output=C:/tmp/gui-smoke.json",
+                "--gui-smoke-timeout-ms=20000",
+                "--doctor-output=C:/tmp/doctor.json",
                 "--smoke-exit-ms=500",
                 "--benchmark-output=C:/tmp/out.json",
                 "--benchmark-root=C:/tmp/bench.tpdata",
@@ -23,6 +27,10 @@ class CliArgsTests(unittest.TestCase):
         )
 
         self.assertTrue(args.startup_smoke)
+        self.assertTrue(args.gui_smoke)
+        self.assertEqual(args.gui_smoke_output, Path("C:/tmp/gui-smoke.json"))
+        self.assertEqual(args.gui_smoke_timeout_ms, 20000)
+        self.assertEqual(args.doctor_output, Path("C:/tmp/doctor.json"))
         self.assertEqual(args.smoke_exit_ms, 500)
         self.assertEqual(args.benchmark_output, Path("C:/tmp/out.json"))
         self.assertEqual(args.benchmark_root, Path("C:/tmp/bench.tpdata"))

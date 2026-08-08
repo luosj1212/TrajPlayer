@@ -4,6 +4,11 @@ import sys
 from pathlib import Path
 
 project_root = Path(SPECPATH)
+sys.path.insert(0, str(project_root))
+
+from trajplayer import __display_version__
+
+
 extra_binaries = []
 if os.name == 'nt':
     conda_prefixes = [Path(sys.prefix)]
@@ -117,3 +122,35 @@ coll = COLLECT(
     upx_exclude=[],
     name='TrajPlayer',
 )
+
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        coll,
+        name='TrajPlayer.app',
+        icon=None,
+        bundle_identifier='io.github.luosj1212.TrajPlayer',
+        version=__display_version__.split('-', 1)[0],
+        info_plist={
+            'NSPrincipalClass': 'NSApplication',
+            'NSHighResolutionCapable': True,
+            'LSMinimumSystemVersion': '13.0',
+            'LSApplicationCategoryType': 'public.app-category.education',
+            'CFBundleDocumentTypes': [
+                {
+                    'CFBundleTypeName': 'Molecular trajectory',
+                    'CFBundleTypeRole': 'Viewer',
+                    'CFBundleTypeExtensions': [
+                        'traj',
+                        'xyz',
+                        'extxyz',
+                        'gro',
+                        'xtc',
+                        'trr',
+                        'pdb',
+                        'cif',
+                    ],
+                    'LSHandlerRank': 'Alternate',
+                },
+            ],
+        },
+    )

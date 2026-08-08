@@ -20,6 +20,8 @@ jobs:
             python: "3.10"
           - os: ubuntu-22.04
             python: "3.11"
+          - os: macos-15
+            python: "3.11"
 
     steps:
       - uses: actions/checkout@v7
@@ -36,7 +38,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
+          sudo apt-get install -y xvfb libegl1 libgl1 libgl1-mesa-dri libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
 
       - name: Install project
         run: python -m pip install -e ".[dev]"
@@ -45,6 +47,29 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
+
+      - name: Exercise a real GUI and OpenGL trajectory on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python app.py --gui-smoke --gui-smoke-timeout-ms=20000 --gui-smoke-output=gui-smoke.json examples/c60.extxyz
+          Get-Content gui-smoke.json
+
+      - name: Exercise a real GUI and software OpenGL trajectory on Linux
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          xvfb-run -a python app.py --gui-smoke --gui-smoke-timeout-ms=20000 --gui-smoke-output=gui-smoke.json examples/c60.extxyz
+          cat gui-smoke.json
+
+      - name: Exercise a real GUI and OpenGL trajectory on macOS
+        if: runner.os == 'macOS'
+        env:
+          QT_QPA_PLATFORM: cocoa
+        run: |
+          python app.py --gui-smoke --gui-smoke-timeout-ms=20000 --gui-smoke-output=gui-smoke.json examples/c60.extxyz
+          cat gui-smoke.json
 
       - name: Compile source
         run: python -m compileall -q app.py trajplayer scripts

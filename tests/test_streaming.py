@@ -1,3 +1,4 @@
+import threading
 import tempfile
 import time
 import unittest
@@ -149,6 +150,69 @@ class FrameStreamerTests(unittest.TestCase):
                     self.assertTrue(streamer.is_window_ready(3))
                 finally:
                     streamer.stop()
+
+    def test_loader_errors_are_propagated_and_wake_waiters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with BinaryTrajectoryStore.create(
+                Path(tmp) / "error.tpdata",
+                frame_count=2,
+                atom_numbers=np.array([1], dtype=np.uint16),
+                symbols=["H"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+            ) as store:
+                errors: list[BaseException] = []
+
+                def failed_frame(_frame_index: int) -> np.ndarray:
+                    raise OSError("simulated frame read failure")
+
+                store.frame = failed_frame  # type: ignore[method-assign]
+                streamer = FrameStreamer(store, error_callback=errors.append)
+                streamer.start()
+                streamer.seek(0)
+
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and not errors:
+                    time.sleep(0.01)
+
+                self.assertEqual(len(errors), 1)
+                self.assertIsInstance(errors[0], OSError)
+                self.assertIs(streamer.error, errors[0])
+                self.assertIsNone(streamer.wait_for_frame(0, timeout_s=0.1))
+                self.assertTrue(streamer.stop())
+
+    def test_stop_keeps_thread_owned_until_blocking_read_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with BinaryTrajectoryStore.create(
+                Path(tmp) / "blocking.tpdata",
+                frame_count=1,
+                atom_numbers=np.array([1], dtype=np.uint16),
+                symbols=["H"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+            ) as store:
+                entered = threading.Event()
+                release = threading.Event()
+                original_frame = store.frame
+
+                def blocking_frame(frame_index: int) -> np.ndarray:
+                    entered.set()
+                    release.wait(timeout=2.0)
+                    return original_frame(frame_index)
+
+                store.frame = blocking_frame  # type: ignore[method-assign]
+                streamer = FrameStreamer(store)
+                streamer.start()
+                streamer.seek(0)
+                self.assertTrue(entered.wait(timeout=1.0))
+
+                self.assertFalse(streamer.stop(timeout_s=0.01))
+                self.assertTrue(streamer.is_alive)
+                release.set()
+                self.assertTrue(streamer.stop(timeout_s=1.0))
+                self.assertFalse(streamer.is_alive)
 
 
 if __name__ == "__main__":

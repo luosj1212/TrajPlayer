@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import threading
 import uuid
 from dataclasses import dataclass
@@ -19,6 +20,11 @@ CELLS_FILE = "cells.f32"
 ATOM_NUMBERS_FILE = "atom_numbers.u16"
 FRAME_AVAILABILITY_FILE = "frame_availability.u8"
 METADATA_FILE = "metadata.json"
+MAX_METADATA_BYTES = 1024 * 1024
+
+
+class CacheValidationError(ValueError):
+    """Raised when a trajectory sidecar is unsafe or internally inconsistent."""
 
 
 def cache_dir_for_source(source_path: Path) -> Path:
@@ -261,42 +267,117 @@ class BinaryTrajectoryStore:
         )
 
     @classmethod
-    def open(cls, root: Path, mode: str = "r+") -> "BinaryTrajectoryStore":
+    def open(cls, root: Path, mode: str = "r") -> "BinaryTrajectoryStore":
         root = root.resolve()
-        metadata = json.loads((root / METADATA_FILE).read_text(encoding="utf-8"))
-        if int(metadata.get("version", 0)) not in SUPPORTED_STORE_VERSIONS:
-            raise ValueError(f"Unsupported trajectory store version: {metadata.get('version')}")
-        if metadata.get("dtype") != "float32":
-            raise ValueError(f"Unsupported trajectory dtype: {metadata.get('dtype')}")
+        if mode not in {"r", "r+", "c"}:
+            raise ValueError(f"Unsupported trajectory store mode: {mode}")
 
-        frame_count = int(metadata["frame_count"])
-        atom_count = int(metadata["atom_count"])
+        metadata_path = _validated_member(root, METADATA_FILE)
+        metadata_size = metadata_path.stat().st_size
+        if metadata_size > MAX_METADATA_BYTES:
+            raise CacheValidationError(
+                f"Trajectory metadata is too large: {metadata_size} bytes"
+            )
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise CacheValidationError(f"Invalid trajectory metadata: {exc}") from exc
+        if not isinstance(metadata, dict):
+            raise CacheValidationError("Trajectory metadata must be a JSON object")
+
+        version = _metadata_int(metadata, "version", minimum=0)
+        if version not in SUPPORTED_STORE_VERSIONS:
+            raise CacheValidationError(
+                f"Unsupported trajectory store version: {metadata.get('version')}"
+            )
+        if metadata.get("dtype") != "float32":
+            raise CacheValidationError(
+                f"Unsupported trajectory dtype: {metadata.get('dtype')}"
+            )
+
+        frame_count = _metadata_int(metadata, "frame_count", minimum=1)
+        atom_count = _metadata_int(metadata, "atom_count", minimum=1)
+        expected_shape = (frame_count, atom_count, 3)
+        shape = metadata.get("shape")
+        if shape is not None and not _shape_matches(shape, expected_shape):
+            raise CacheValidationError(
+                f"Invalid position shape {shape!r}; expected {list(expected_shape)!r}"
+            )
+
+        available_frame_count = _metadata_int(
+            metadata,
+            "available_frame_count",
+            minimum=0,
+            default=frame_count if metadata.get("complete", True) else 0,
+        )
+        if available_frame_count > frame_count:
+            raise CacheValidationError(
+                "available_frame_count exceeds frame_count"
+            )
+        _validate_metadata_structure(metadata, atom_count=atom_count)
+
+        positions_path = _validated_sized_member(
+            root,
+            POSITIONS_FILE,
+            _array_nbytes("positions", expected_shape, np.dtype(np.float32).itemsize),
+        )
+        atom_numbers_path = _validated_sized_member(
+            root,
+            ATOM_NUMBERS_FILE,
+            _array_nbytes("atom numbers", (atom_count,), np.dtype(np.uint16).itemsize),
+        )
+
+        cell_shape = metadata.get("cell_shape")
+        cells_path: Path | None = None
+        if cell_shape is not None:
+            expected_cell_shape = (frame_count, 3, 3)
+            if not _shape_matches(cell_shape, expected_cell_shape):
+                raise CacheValidationError(
+                    f"Invalid cell shape {cell_shape!r}; expected {list(expected_cell_shape)!r}"
+                )
+            cells_path = _validated_sized_member(
+                root,
+                CELLS_FILE,
+                _array_nbytes("cells", expected_cell_shape, np.dtype(np.float32).itemsize),
+            )
+
+        availability_name = metadata.get("frame_availability_file")
+        availability_path: Path | None = None
+        if availability_name is not None:
+            if availability_name != FRAME_AVAILABILITY_FILE:
+                raise CacheValidationError(
+                    "Invalid frame availability member name"
+                )
+            availability_path = _validated_sized_member(
+                root,
+                FRAME_AVAILABILITY_FILE,
+                _array_nbytes("frame availability", (frame_count,), np.dtype(np.uint8).itemsize),
+            )
+
         positions = np.memmap(
-            root / POSITIONS_FILE,
+            positions_path,
             dtype=np.float32,
             mode=mode,
-            shape=(frame_count, atom_count, 3),
+            shape=expected_shape,
         )
-        cell_shape = metadata.get("cell_shape")
         cells = None
-        if cell_shape is not None and (root / CELLS_FILE).exists():
+        if cells_path is not None:
             cells = np.memmap(
-                root / CELLS_FILE,
+                cells_path,
                 dtype=np.float32,
                 mode=mode,
-                shape=tuple(int(v) for v in cell_shape),
+                shape=(frame_count, 3, 3),
             )
         atom_numbers = np.memmap(
-            root / ATOM_NUMBERS_FILE,
+            atom_numbers_path,
             dtype=np.uint16,
             mode="r",
             shape=(atom_count,),
         )
-        availability_name = metadata.get("frame_availability_file")
         frame_availability = None
-        if availability_name is not None and (root / str(availability_name)).exists():
+        if availability_path is not None:
             frame_availability = np.memmap(
-                root / str(availability_name),
+                availability_path,
                 dtype=np.uint8,
                 mode=mode,
                 shape=(frame_count,),
@@ -437,3 +518,101 @@ def _write_metadata(root: Path, metadata: dict[str, Any]) -> None:
     temporary = root / f"{METADATA_FILE}.tmp"
     temporary.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     temporary.replace(target)
+
+
+def _metadata_int(
+    metadata: dict[str, Any],
+    key: str,
+    *,
+    minimum: int,
+    default: int | None = None,
+) -> int:
+    value = metadata.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise CacheValidationError(f"Trajectory metadata {key!r} must be an integer")
+    if value < minimum:
+        raise CacheValidationError(
+            f"Trajectory metadata {key!r} must be at least {minimum}"
+        )
+    return value
+
+
+def _shape_matches(value: object, expected: tuple[int, ...]) -> bool:
+    if not isinstance(value, list) or len(value) != len(expected):
+        return False
+    return all(
+        not isinstance(item, bool) and isinstance(item, int) and item == wanted
+        for item, wanted in zip(value, expected)
+    )
+
+
+def _validate_metadata_structure(metadata: dict[str, Any], *, atom_count: int) -> None:
+    for key in ("complete", "random_access", "temporary_cache"):
+        if key in metadata and not isinstance(metadata[key], bool):
+            raise CacheValidationError(f"Trajectory metadata {key!r} must be boolean")
+
+    source = metadata.get("source", {})
+    _validate_source_identity(source, field="source")
+    source_files = metadata.get("source_files")
+    if source_files is not None:
+        if not isinstance(source_files, list) or not source_files:
+            raise CacheValidationError("Trajectory metadata 'source_files' must be a non-empty list")
+        for index, identity in enumerate(source_files):
+            _validate_source_identity(identity, field=f"source_files[{index}]")
+
+    symbols = metadata.get("unique_symbols")
+    if symbols is not None and (
+        not isinstance(symbols, list)
+        or len(symbols) > atom_count
+        or any(not isinstance(symbol, str) or not symbol for symbol in symbols)
+    ):
+        raise CacheValidationError("Trajectory metadata 'unique_symbols' is invalid")
+
+
+def _validate_source_identity(value: object, *, field: str) -> None:
+    if not isinstance(value, dict):
+        raise CacheValidationError(f"Trajectory metadata {field!r} must be an object")
+    path = value.get("path")
+    if path is not None and not isinstance(path, str):
+        raise CacheValidationError(f"Trajectory metadata {field!r} has an invalid path")
+    for key in ("mtime_ns", "size"):
+        number = value.get(key, 0)
+        if isinstance(number, bool) or not isinstance(number, int) or number < 0:
+            raise CacheValidationError(
+                f"Trajectory metadata {field!r} has an invalid {key}"
+            )
+
+
+def _array_nbytes(name: str, shape: tuple[int, ...], itemsize: int) -> int:
+    size = int(itemsize)
+    for dimension in shape:
+        if dimension <= 0 or size > sys.maxsize // dimension:
+            raise CacheValidationError(f"Trajectory {name} dimensions are too large")
+        size *= dimension
+    return size
+
+
+def _validated_member(root: Path, name: str) -> Path:
+    if Path(name).name != name or name in {"", ".", ".."}:
+        raise CacheValidationError(f"Invalid trajectory cache member: {name!r}")
+    try:
+        member = (root / name).resolve(strict=True)
+    except OSError as exc:
+        raise CacheValidationError(
+            f"Missing trajectory cache member: {name}"
+        ) from exc
+    if not member.is_relative_to(root) or not member.is_file():
+        raise CacheValidationError(
+            f"Trajectory cache member escapes its cache directory: {name}"
+        )
+    return member
+
+
+def _validated_sized_member(root: Path, name: str, expected_bytes: int) -> Path:
+    member = _validated_member(root, name)
+    actual_bytes = member.stat().st_size
+    if actual_bytes != expected_bytes:
+        raise CacheValidationError(
+            f"Invalid {name} size: {actual_bytes} bytes; expected {expected_bytes}"
+        )
+    return member

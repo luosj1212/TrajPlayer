@@ -1,4 +1,4 @@
-TrajPlayer v0.1.0-alpha.4 distribution
+TrajPlayer v0.1.0-alpha.5 distribution
 
 Windows
 1. Extract the entire TrajPlayer folder from the zip archive.
@@ -11,13 +11,26 @@ Linux x86_64 (Ubuntu 22.04 or compatible)
 3. Keep the _internal folder next to TrajPlayer.
 4. An OpenGL 3.3 capable graphics driver is required.
 
-The executable cannot run if it is sent or moved without its _internal folder.
+macOS 13 or newer
+1. Choose the arm64 ZIP for Apple Silicon or the x86_64 ZIP for an Intel Mac.
+2. Extract the entire TrajPlayer-macOS folder, then open TrajPlayer.app.
+3. TrajPlayer.app can be moved to Applications as a whole.
+4. The alpha app is not notarized. On first launch, Control-click the app, choose Open, and confirm Open.
+5. An OpenGL 3.3 capable Mac is required.
+
+The Windows/Linux executable cannot run if it is sent or moved without its _internal folder. On macOS, do not move files out of TrajPlayer.app.
 
 Windows NumPy startup error
 - Do not install Python or NumPy; they are already bundled.
 - Make sure _internal\numpy\_core\_multiarray_umath.cp310-win_amd64.pyd exists.
 - If it is missing, extract a fresh copy of the complete Release ZIP.
 - Check Windows Security > Protection history if the file disappears after extraction.
+
+Diagnostics
+- Windows: TrajPlayer.exe --doctor-output=trajplayer-diagnostics.json
+- Linux: ./TrajPlayer/TrajPlayer --doctor-output=trajplayer-diagnostics.json
+- macOS: ./TrajPlayer.app/Contents/MacOS/TrajPlayer --doctor-output=trajplayer-diagnostics.json
+- The report includes dependency and OpenGL driver information with local account paths redacted.
 
 Project and issue tracker
 https://github.com/luosj1212/TrajPlayer
@@ -34,7 +47,8 @@ Gromacs trajectories
 Display
 - Choose Ball-stick, Ball, or Bond from the representation control.
 - Atom and bond sizes are independently adjustable with sliders. At 100%, Ball-stick uses 0.25x van der Waals atom radii and 0.20 A sticks; Ball uses full van der Waals radii.
-- Use the All, Chain, and Atom segments plus the adjacent slider to control which atoms are visible.
+- Use All, Chain, and Atom to control visibility. Chain accepts entries such as 1,3-5; Atom uses the adjacent slider.
+- Bond status states when bonds were inferred from frame 1; clear Infer bonds to disable that static inference.
 - Playback speed is adjustable from 1 to 60 FPS. Frames are always displayed in sequence and are never skipped.
 
 Performance

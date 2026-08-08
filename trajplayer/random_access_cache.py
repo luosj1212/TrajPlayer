@@ -296,7 +296,7 @@ def _open_compatible_partial_store(
     root: Path,
 ) -> BinaryTrajectoryStore | None:
     try:
-        store = BinaryTrajectoryStore.open(root)
+        store = BinaryTrajectoryStore.open(root, mode="r+")
     except Exception:
         return None
     if not store.supports_random_access or not store.is_valid_for_sources(source.paths):

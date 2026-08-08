@@ -1,4 +1,6 @@
+import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +9,10 @@ import numpy as np
 
 from trajplayer.binary_store import (
     BinaryTrajectoryStore,
+    CacheValidationError,
+    MAX_METADATA_BYTES,
+    METADATA_FILE,
+    POSITIONS_FILE,
     cache_dir_for_source,
     prepare_cache_directory,
 )
@@ -184,6 +190,117 @@ class BinaryTrajectoryStoreTests(unittest.TestCase):
                     reopened.frame(4),
                     np.array([[4.0, 5.0, 6.0]], dtype=np.float32),
                 )
+
+    def test_open_rejects_truncated_position_buffer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "truncated.tpdata"
+            with BinaryTrajectoryStore.create(
+                root,
+                frame_count=2,
+                atom_numbers=np.array([6, 1], dtype=np.uint16),
+                symbols=["C", "H"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+            ):
+                pass
+            with (root / POSITIONS_FILE).open("r+b") as handle:
+                handle.truncate(12)
+
+            with self.assertRaisesRegex(CacheValidationError, "positions.f32 size"):
+                BinaryTrajectoryStore.open(root)
+
+    def test_open_rejects_availability_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "traversal.tpdata"
+            with BinaryTrajectoryStore.create(
+                root,
+                frame_count=2,
+                atom_numbers=np.array([6], dtype=np.uint16),
+                symbols=["C"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+                progressive=True,
+            ):
+                pass
+            metadata_path = root / METADATA_FILE
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["frame_availability_file"] = "../outside.u8"
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(CacheValidationError, "availability member"):
+                BinaryTrajectoryStore.open(root)
+
+    def test_open_rejects_cell_shape_that_does_not_match_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "bad-cell-shape.tpdata"
+            with BinaryTrajectoryStore.create(
+                root,
+                frame_count=2,
+                atom_numbers=np.array([6], dtype=np.uint16),
+                symbols=["C"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+                store_cells=True,
+            ):
+                pass
+            metadata_path = root / METADATA_FILE
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["cell_shape"] = [1, 3, 3]
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(CacheValidationError, "Invalid cell shape"):
+                BinaryTrajectoryStore.open(root)
+
+    def test_open_rejects_dimensions_that_overflow_platform_address_space(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "oversized.tpdata"
+            with BinaryTrajectoryStore.create(
+                root,
+                frame_count=1,
+                atom_numbers=np.array([6], dtype=np.uint16),
+                symbols=["C"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+            ):
+                pass
+            metadata_path = root / METADATA_FILE
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["frame_count"] = sys.maxsize
+            metadata["shape"] = [sys.maxsize, 1, 3]
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(CacheValidationError, "dimensions are too large"):
+                BinaryTrajectoryStore.open(root)
+
+    def test_open_rejects_oversized_or_malformed_metadata_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            oversized_root = Path(tmp) / "oversized-metadata.tpdata"
+            oversized_root.mkdir()
+            (oversized_root / METADATA_FILE).write_bytes(b" " * (MAX_METADATA_BYTES + 1))
+            with self.assertRaisesRegex(CacheValidationError, "metadata is too large"):
+                BinaryTrajectoryStore.open(oversized_root)
+
+            malformed_root = Path(tmp) / "malformed-metadata.tpdata"
+            with BinaryTrajectoryStore.create(
+                malformed_root,
+                frame_count=1,
+                atom_numbers=np.array([6], dtype=np.uint16),
+                symbols=["C"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+            ):
+                pass
+            metadata_path = malformed_root / METADATA_FILE
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["source"] = ["not", "an", "object"]
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            with self.assertRaisesRegex(CacheValidationError, "'source' must be an object"):
+                BinaryTrajectoryStore.open(malformed_root)
 
 
 if __name__ == "__main__":

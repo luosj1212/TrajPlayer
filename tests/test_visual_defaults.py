@@ -9,6 +9,16 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn("*.gro *.xtc *.trr", source)
         self.assertIn("load_trajectory_paths", source)
 
+    def test_macos_finder_open_events_are_coalesced_for_gromacs_pairs(self) -> None:
+        source = Path("app.py").read_text(encoding="utf-8")
+
+        self.assertIn("class TrajPlayerApplication(QApplication):", source)
+        self.assertIn("QEvent.Type.FileOpen", source)
+        self.assertIn("self._pending_file_open_paths.append(path)", source)
+        self.assertIn("self.external_open_timer.setInterval(120)", source)
+        self.assertIn("def open_queued_external_paths", source)
+        self.assertIn("self.load_trajectory_paths(paths)", source)
+
     def test_window_enables_ball_and_stick_for_real_trajectories_by_default(self) -> None:
         source = Path("app.py").read_text(encoding="utf-8")
 
@@ -18,9 +28,37 @@ class VisualDefaultTests(unittest.TestCase):
 
         self.assertIn("class BondInferenceThread(QThread):", source)
         self.assertIn("self.start_bond_inference(store)", loaded_source)
-        self.assertIn("self.gl_view.set_bonds(bonds)", source)
+        self.assertIn("self.gl_view.set_bonds(topology.bonds)", source)
         self.assertIn('store.metadata.get("synthetic")', source)
         self.assertIn("self.gl_view.set_render_mode", loaded_source)
+
+    def test_bond_inference_source_is_visible_and_can_be_disabled(self) -> None:
+        source = Path("app.py").read_text(encoding="utf-8")
+
+        self.assertIn('self.infer_bonds_check = QCheckBox("Infer bonds")', source)
+        self.assertIn("self.infer_bonds_check.toggled.connect", source)
+        self.assertIn("def on_infer_bonds_toggled", source)
+        self.assertIn("self.bond_topology.description", source)
+        self.assertIn("inferred from frame 1", source)
+
+    def test_open_shortcut_uses_the_platform_standard_binding(self) -> None:
+        source = Path("app.py").read_text(encoding="utf-8")
+
+        self.assertIn("QKeySequence.StandardKey.Open", source)
+        self.assertNotIn('(QKeySequence("O"), self.open_file)', source)
+
+    def test_render_timer_sleeps_while_the_viewer_is_idle(self) -> None:
+        source = Path("app.py").read_text(encoding="utf-8")
+
+        self.assertIn("self.render_timer.setSingleShot(True)", source)
+        self.assertIn("self.render_timer.start(max(1, int(math.ceil", source)
+        self.assertNotIn("self.render_timer.start()", source)
+
+    def test_switching_trajectories_does_not_wait_for_stream_io_on_the_ui_thread(self) -> None:
+        source = Path("app.py").read_text(encoding="utf-8")
+
+        self.assertIn("streamer.stop(timeout_s=0.0)", source)
+        self.assertIn("self._retired_streamers[streamer] = store", source)
 
     def test_window_exposes_gpu_ball_stick_ball_and_bond_size_controls(self) -> None:
         source = Path("app.py").read_text(encoding="utf-8")
@@ -77,7 +115,11 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn('(("All", "all", 38), ("Chain", "chain", 52), ("Atom", "atom", 46))', source)
         self.assertIn("self.filter_value_slider = QSlider", source)
         self.assertIn('self.filter_value_label = QLabel("All atoms")', source)
-        self.assertIn('horizontalAdvance(f"Chain {largest_index}") + 6', source)
+        self.assertIn('self.chain_selection_edit = QLineEdit("1")', source)
+        self.assertIn('self.chain_selection_edit.setPlaceholderText("1,3-5")', source)
+        self.assertIn("parse_chain_selection", source)
+        self.assertIn("unwrap_group_ids = self.component_ids", source)
+        self.assertIn("unwrap_group_ids=unwrap_group_ids", source)
         self.assertNotIn("self.filter_mode_combo", source)
         self.assertNotIn("self.filter_value_spin", source)
         self.assertNotIn("QSpinBox", source)

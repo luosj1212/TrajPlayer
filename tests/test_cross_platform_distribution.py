@@ -21,8 +21,21 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         source = Path("build_linux.sh").read_text(encoding="utf-8")
         self.assertIn("python scripts/build_release.py", source)
         release_source = Path("scripts/build_release.py").read_text(encoding="utf-8")
-        self.assertIn('base_dir="TrajPlayer"', release_source)
+        self.assertIn("base_dir=portable_dir.name", release_source)
         self.assertIn('"gztar"', release_source)
+
+    def test_macos_build_creates_a_native_app_bundle_and_preserves_it(self) -> None:
+        spec_source = Path("TrajPlayer.spec").read_text(encoding="utf-8")
+        build_source = Path("scripts/build_release.py").read_text(encoding="utf-8")
+        script_source = Path("build_macos.sh").read_text(encoding="utf-8")
+
+        self.assertIn("if sys.platform == 'darwin':", spec_source)
+        self.assertIn("app = BUNDLE(", spec_source)
+        self.assertIn("CFBundleDocumentTypes", spec_source)
+        self.assertIn("io.github.luosj1212.TrajPlayer", spec_source)
+        self.assertIn('"ditto"', build_source)
+        self.assertIn('"codesign"', build_source)
+        self.assertIn("python scripts/build_release.py", script_source)
 
     def test_wsl_build_uses_linux_filesystem_for_the_virtualenv(self) -> None:
         source = Path("build_linux_wsl.sh").read_text(encoding="utf-8")
@@ -36,6 +49,22 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         function = function.split("def missing_numpy_runtime_components(", 1)[0]
         self.assertIn('if os.name != "nt":', function)
         self.assertIn("return", function)
+
+    def test_ci_and_release_exercise_real_gui_opengl_frames(self) -> None:
+        ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        release = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+        self.assertIn("--gui-smoke", ci)
+        self.assertIn("xvfb-run", ci)
+        self.assertIn("--gui-smoke", release)
+        self.assertIn("xvfb-run", release)
+        self.assertIn("libgl1-mesa-dri", release)
+        self.assertIn("macos-15", ci)
+        self.assertIn("QT_QPA_PLATFORM: cocoa", ci)
+        self.assertIn("macOS-arm64", release)
+        self.assertIn("macOS-x86_64", release)
+        self.assertIn("Smoke-test macOS app bundle", release)
+        self.assertIn("codesign --verify --deep --strict", release)
 
 
 if __name__ == "__main__":

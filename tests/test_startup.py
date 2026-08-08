@@ -50,6 +50,34 @@ class StartupTests(unittest.TestCase):
         self.assertIn("Linux tar.gz", message)
         self.assertNotIn("Windows Security", message)
 
+    def test_macos_numpy_runtime_only_requires_the_bundled_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.assertEqual(
+                missing_numpy_runtime_components(root, system="Darwin"),
+                ("numpy/_core/_multiarray_umath*.so",),
+            )
+            extension = root / "numpy" / "_core" / "_multiarray_umath.cpython-311-darwin.so"
+            extension.parent.mkdir(parents=True)
+            extension.touch()
+
+            self.assertEqual(
+                missing_numpy_runtime_components(root, system="Darwin"),
+                (),
+            )
+
+    def test_macos_import_error_uses_macos_recovery_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            message = format_numpy_import_error(
+                ImportError("native extension failed"),
+                Path(temporary_directory),
+                system="Darwin",
+            )
+
+        self.assertIn("macOS ZIP", message)
+        self.assertIn("TrajPlayer.app", message)
+        self.assertNotIn("Linux tar.gz", message)
+
 
 if __name__ == "__main__":
     unittest.main()

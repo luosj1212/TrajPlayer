@@ -97,8 +97,18 @@ def main() -> None:
                 errors.append(f"local machine path in {relative}: {forbidden}")
 
     init_source = (ROOT / "trajplayer" / "__init__.py").read_text(encoding="utf-8")
-    if re.search(r'__version__\s*=\s*"0\.1\.0a4"', init_source) is None:
-        errors.append("trajplayer.__version__ is not 0.1.0a4")
+    version_match = re.search(r'__version__\s*=\s*"([^"]+)"', init_source)
+    display_match = re.search(r'__display_version__\s*=\s*"([^"]+)"', init_source)
+    if version_match is None or display_match is None:
+        errors.append("TrajPlayer version metadata is missing")
+    else:
+        package_version = version_match.group(1)
+        display_version = display_match.group(1)
+        if package_version != display_version.replace("-alpha.", "a"):
+            errors.append("package and display versions do not match")
+        release_notes = ROOT / "docs" / "releases" / f"v{display_version}.md"
+        if not release_notes.is_file():
+            errors.append(f"missing release notes: {release_notes.relative_to(ROOT)}")
 
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
     for requirement in requirements:

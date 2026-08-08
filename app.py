@@ -7,9 +7,9 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
-from trajplayer.startup import initialize_runtime, report_numpy_import_error
+from trajplayer.startup import error_log_path, initialize_runtime, report_numpy_import_error
 
 
 initialize_runtime()
@@ -20,7 +20,7 @@ except Exception as exc:
     report_numpy_import_error(exc)
     raise SystemExit(1) from None
 
-from PySide6.QtCore import QSize, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QSurfaceFormat
 from PySide6.QtWidgets import (
     QApplication,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -50,7 +51,9 @@ from trajplayer.benchmark_store import create_synthetic_store
 from trajplayer.binary_store import BinaryTrajectoryStore
 from trajplayer.bonds import connected_components, infer_bonds
 from trajplayer.cli_args import CliArgs, parse_cli_args
+from trajplayer.diagnostics import diagnostics_json, probe_opengl
 from trajplayer.gl_view import MoleculeGLWidget, default_surface_format
+from trajplayer.gui_smoke import GuiSmokeController
 from trajplayer.playback import PlaybackEngine
 from trajplayer.random_access_cache import (
     open_random_access_session,
@@ -58,7 +61,13 @@ from trajplayer.random_access_cache import (
     write_reader_frame,
 )
 from trajplayer.scrubbing import SliderScrubState
+from trajplayer.selection import (
+    ChainSelectionError,
+    format_chain_selection,
+    parse_chain_selection,
+)
 from trajplayer.streaming import FrameStreamer
+from trajplayer.topology import BondSource, BondTopology, empty_topology
 from trajplayer.trajectory_source import (
     TrajectorySelectionError,
     TrajectorySource,
@@ -168,6 +177,23 @@ QComboBox:disabled {
     border-color: #e3e6ea;
     background: #f7f8f9;
 }
+QLineEdit#chainSelectionEdit {
+    min-height: 30px;
+    border: 1px solid #cdd3da;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #20242a;
+    padding: 0 8px;
+    selection-background-color: #1769aa;
+    selection-color: #ffffff;
+}
+QLineEdit#chainSelectionEdit:hover, QLineEdit#chainSelectionEdit:focus {
+    border-color: #6f9bc5;
+}
+QLineEdit#chainSelectionEdit[invalid="true"] {
+    border-color: #c43d4b;
+    background: #fff7f8;
+}
 QFrame#filterModeSegment {
     min-height: 30px;
     max-height: 30px;
@@ -250,6 +276,41 @@ QStatusBar {
     border-top: 1px solid #dfe3e8;
 }
 """
+
+
+class TrajPlayerApplication(QApplication):
+    """Capture Finder file-open events before or after the main window exists."""
+
+    def __init__(self, argv: list[str]) -> None:
+        super().__init__(argv)
+        self._file_open_handler: Callable[[Path], None] | None = None
+        self._pending_file_open_paths: list[Path] = []
+
+    def set_file_open_handler(
+        self,
+        handler: Callable[[Path], None],
+        *,
+        replay_pending: bool = True,
+    ) -> None:
+        self._file_open_handler = handler
+        pending = tuple(self._pending_file_open_paths) if replay_pending else ()
+        self._pending_file_open_paths.clear()
+        for path in pending:
+            handler(path)
+
+    def event(self, event) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.Type.FileOpen:
+            file_name = event.file()
+            if not file_name and not event.url().isEmpty():
+                file_name = event.url().toLocalFile()
+            if file_name:
+                path = Path(file_name)
+                if self._file_open_handler is None:
+                    self._pending_file_open_paths.append(path)
+                else:
+                    self._file_open_handler(path)
+                return True
+        return super().event(event)
 
 
 class TrajectoryOpenThread(QThread):
@@ -390,7 +451,7 @@ class TrajectoryOpenThread(QThread):
 
 
 class BondInferenceThread(QThread):
-    ready = Signal(int, object, object, object, float)
+    ready = Signal(int, object, float)
     failed = Signal(int, str)
 
     def __init__(
@@ -420,11 +481,16 @@ class BondInferenceThread(QThread):
             component_ids, component_sizes = connected_components(len(self.atom_numbers), bonds)
             if self.isInterruptionRequested():
                 return
+            topology = BondTopology(
+                bonds=bonds,
+                component_ids=component_ids,
+                component_sizes=component_sizes,
+                source=BondSource.INFERRED_STATIC,
+                source_frame=0,
+            )
             self.ready.emit(
                 self.generation,
-                bonds,
-                component_ids,
-                component_sizes,
+                topology,
                 (time.perf_counter() - start) * 1000.0,
             )
         except Exception as exc:
@@ -434,10 +500,11 @@ class BondInferenceThread(QThread):
 
 class TrajPlayerWindow(QMainWindow):
     stream_frame_ready = Signal(int)
+    stream_failed = Signal(object, str)
+    error_reported = Signal(str)
 
     TARGET_FPS = 60.0
     PREFETCH_RADIUS = 200
-    IDLE_RENDER_TIMER_MS = 16
     SCRUB_PREVIEW_TIMER_MS = 4
     SCRUB_PREVIEW_FPS = 60.0
 
@@ -455,6 +522,7 @@ class TrajPlayerWindow(QMainWindow):
         self._retired_open_stores: dict[
             TrajectoryOpenThread, BinaryTrajectoryStore | None
         ] = {}
+        self._retired_streamers: dict[FrameStreamer, BinaryTrajectoryStore] = {}
         self.cache_build_in_progress = False
         self.bond_thread: BondInferenceThread | None = None
         self._retired_bond_threads: set[BondInferenceThread] = set()
@@ -468,8 +536,11 @@ class TrajPlayerWindow(QMainWindow):
         self.suppress_slider_value: int | None = None
         self.component_ids = np.empty((0,), dtype=np.int32)
         self.component_sizes = np.empty((0,), dtype=np.int32)
+        self.bond_topology = empty_topology()
         self.filter_mode = "all"
-        self.filter_values = {"chain": 1, "atom": 1}
+        self.filter_values = {"atom": 1}
+        self.selected_chains = (1,)
+        self._external_open_paths: list[Path] = []
         self.slider_scrub = SliderScrubState(preview_interval_s=1.0 / self.SCRUB_PREVIEW_FPS)
         self.benchmark_output: Path | None = None
         self.benchmark_target_frames = 0
@@ -478,9 +549,16 @@ class TrajPlayerWindow(QMainWindow):
         self.benchmark_diagnostics: BenchmarkDiagnostics | None = None
         self.benchmark_finish_gpu = False
         self.benchmark_warmup_started_s = 0.0
+        self.automation_mode = False
+        self.gui_smoke_controller: GuiSmokeController | None = None
 
         self.gl_view = MoleculeGLWidget()
         self.stream_frame_ready.connect(self.on_stream_frame_ready)
+        self.stream_failed.connect(self.on_stream_failed)
+
+        self.retired_streamer_timer = QTimer(self)
+        self.retired_streamer_timer.setInterval(50)
+        self.retired_streamer_timer.timeout.connect(self.reap_retired_streamers)
 
         self.open_button = QPushButton("Open")
         self.open_button.setObjectName("openButton")
@@ -530,6 +608,15 @@ class TrajPlayerWindow(QMainWindow):
         self.box_check.setChecked(True)
         self.box_check.setEnabled(False)
         self.box_check.toggled.connect(self.on_box_toggled)
+
+        self.infer_bonds_check = QCheckBox("Infer bonds")
+        self.infer_bonds_check.setChecked(True)
+        self.infer_bonds_check.setEnabled(False)
+        self.infer_bonds_check.setToolTip(
+            "Infer a static bond topology from frame 1 when no file topology is available"
+        )
+        self.infer_bonds_check.setAccessibleName("Infer bonds from frame 1")
+        self.infer_bonds_check.toggled.connect(self.on_infer_bonds_toggled)
 
         self.playback_speed_label = QLabel("Speed")
         self.playback_speed_label.setObjectName("controlLabel")
@@ -648,6 +735,25 @@ class TrajPlayerWindow(QMainWindow):
         self.filter_value_label.setFixedWidth(76)
         self.filter_value_label.setEnabled(False)
 
+        self.chain_selection_edit = QLineEdit("1")
+        self.chain_selection_edit.setObjectName("chainSelectionEdit")
+        self.chain_selection_edit.setPlaceholderText("1,3-5")
+        self.chain_selection_edit.setFixedWidth(124)
+        self.chain_selection_edit.setMaxLength(512)
+        self.chain_selection_edit.setToolTip(
+            "Enter chain numbers separated by commas; use a dash for ranges"
+        )
+        self.chain_selection_edit.setAccessibleName("Visible chain numbers")
+        self.chain_selection_edit.setProperty("invalid", False)
+        self.chain_selection_edit.setEnabled(False)
+        self.chain_selection_edit.hide()
+        self.chain_selection_edit.textChanged.connect(
+            self.on_chain_selection_changed
+        )
+        self.chain_selection_edit.editingFinished.connect(
+            self.normalize_chain_selection
+        )
+
         self.frame_label = QLabel("Frame 0 / 0")
         self.frame_label.setObjectName("frameLabel")
         self.frame_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -705,11 +811,13 @@ class TrajPlayerWindow(QMainWindow):
         controls.addSpacing(10)
         controls.addWidget(self.loop_check)
         controls.addWidget(self.box_check)
+        controls.addWidget(self.infer_bonds_check)
         controls.addStretch(1)
         controls.addWidget(self.filter_mode_segment)
         controls.addSpacing(4)
         controls.addWidget(self.filter_value_slider)
         controls.addWidget(self.filter_value_label)
+        controls.addWidget(self.chain_selection_edit)
         transport_layout.addLayout(controls)
 
         display_controls = QHBoxLayout()
@@ -750,9 +858,8 @@ class TrajPlayerWindow(QMainWindow):
 
         self.render_timer = QTimer(self)
         self.render_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self.render_timer.setInterval(self.IDLE_RENDER_TIMER_MS)
+        self.render_timer.setSingleShot(True)
         self.render_timer.timeout.connect(self.on_render_tick)
-        self.render_timer.start()
         self.benchmark_poll_timer = QTimer(self)
         self.benchmark_poll_timer.setInterval(100)
         self.benchmark_poll_timer.timeout.connect(self.check_benchmark_finished)
@@ -767,6 +874,10 @@ class TrajPlayerWindow(QMainWindow):
         self.visibility_filter_timer.setSingleShot(True)
         self.visibility_filter_timer.setInterval(16)
         self.visibility_filter_timer.timeout.connect(self.apply_visibility_filter)
+        self.external_open_timer = QTimer(self)
+        self.external_open_timer.setSingleShot(True)
+        self.external_open_timer.setInterval(120)
+        self.external_open_timer.timeout.connect(self.open_queued_external_paths)
 
         self._shortcuts: list[QShortcut] = []
         for key, slot in (
@@ -776,7 +887,7 @@ class TrajPlayerWindow(QMainWindow):
             (QKeySequence(Qt.Key.Key_Home), self.jump_first),
             (QKeySequence(Qt.Key.Key_End), self.jump_last),
             (QKeySequence("R"), self.reset_view),
-            (QKeySequence("O"), self.open_file),
+            (QKeySequence.StandardKey.Open, self.open_file),
         ):
             shortcut = QShortcut(key, self)
             shortcut.activated.connect(slot)
@@ -791,6 +902,18 @@ class TrajPlayerWindow(QMainWindow):
 
     def dropEvent(self, event) -> None:  # type: ignore[override]
         paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
+        if paths:
+            self.load_trajectory_paths(paths)
+
+    def queue_external_open_path(self, path: Path) -> None:
+        candidate = Path(path)
+        if candidate not in self._external_open_paths:
+            self._external_open_paths.append(candidate)
+        self.external_open_timer.start()
+
+    def open_queued_external_paths(self) -> None:
+        paths = tuple(self._external_open_paths)
+        self._external_open_paths.clear()
         if paths:
             self.load_trajectory_paths(paths)
 
@@ -964,7 +1087,10 @@ class TrajPlayerWindow(QMainWindow):
 
     def on_open_thread_finished(self, thread: TrajectoryOpenThread) -> None:
         retired_store = self._retired_open_stores.pop(thread, None)
-        if retired_store is not None:
+        if (
+            retired_store is not None
+            and retired_store not in self._retired_streamers.values()
+        ):
             retired_store.close()
         if self.open_thread is thread and thread.preview_store is None:
             self.open_thread = None
@@ -984,18 +1110,28 @@ class TrajPlayerWindow(QMainWindow):
         store: BinaryTrajectoryStore,
     ) -> None:
         self.store = store
-        self.streamer = FrameStreamer(
+
+        def report_stream_error(error: BaseException) -> None:
+            self.stream_failed.emit(
+                streamer,
+                f"Frame streaming failed: {type(error).__name__}: {error}",
+            )
+
+        streamer = FrameStreamer(
             store,
             prefetch_radius=self.PREFETCH_RADIUS,
             frame_ready_callback=self.stream_frame_ready.emit,
+            error_callback=report_stream_error,
         )
-        self.streamer.start()
+        self.streamer = streamer
+        streamer.start()
         self.current_frame = 0
         self.displayed_frame = -1
         self.last_stream_seek_frame = 0
         self.reset_view_on_next_frame = True
         self.component_ids = np.empty((0,), dtype=np.int32)
         self.component_sizes = np.empty((0,), dtype=np.int32)
+        self.bond_topology = empty_topology()
         self.gl_view.set_atoms(store.atom_numbers)
         self.gl_view.set_render_mode(str(self.render_mode_combo.currentData()))
         self.gl_view.set_atom_size_scale(self.atom_size_slider.value() / 100.0)
@@ -1003,8 +1139,12 @@ class TrajPlayerWindow(QMainWindow):
         self.set_representation_controls_enabled(True)
         self.gl_view.set_box_enabled(self.box_check.isChecked())
         self.box_check.setEnabled(store.has_cells)
+        self.infer_bonds_check.setEnabled(not bool(store.metadata.get("synthetic")))
         self.configure_filter_controls(store.atom_count)
-        self.start_bond_inference(store)
+        if self.infer_bonds_check.isChecked():
+            self.start_bond_inference(store)
+        else:
+            self.gl_view.set_bonds(np.empty((0, 2), dtype=np.int32))
         self.request_stream_frame(0)
 
         self.internal_slider_change = True
@@ -1034,6 +1174,25 @@ class TrajPlayerWindow(QMainWindow):
     def on_box_toggled(self, checked: bool) -> None:
         self.gl_view.set_box_enabled(checked)
         self.displayed_frame = -1
+
+    def on_infer_bonds_toggled(self, checked: bool) -> None:
+        if self.store is None or self.store.metadata.get("synthetic"):
+            return
+        if checked:
+            self.start_bond_inference(self.store)
+            return
+
+        self.stop_bond_inference(wait_ms=0)
+        self.trajectory_generation += 1
+        self.bond_topology = empty_topology()
+        self.component_ids = self.bond_topology.component_ids
+        self.component_sizes = self.bond_topology.component_sizes
+        self.gl_view.set_bonds(self.bond_topology.bonds)
+        self.filter_mode_buttons["chain"].setEnabled(False)
+        if self.filter_mode == "chain":
+            self.on_filter_mode_changed("all")
+        self.update_trajectory_info()
+        self.status_bar.showMessage("Bond inference disabled")
 
     def on_render_mode_changed(self) -> None:
         mode = str(self.render_mode_combo.currentData())
@@ -1066,7 +1225,8 @@ class TrajPlayerWindow(QMainWindow):
     def update_trajectory_info(self) -> None:
         if self.store is None:
             return
-        bond_text = f", {self.gl_view.bond_count} bonds" if self.gl_view.bond_count else ""
+        bond_count = self.gl_view.bond_count
+        bond_text = f", Bonds: {self.bond_topology.description} ({bond_count})"
         cache_text = ""
         if self.streamer is not None:
             cache_mib = self.streamer.memory_bytes / (1024.0 * 1024.0)
@@ -1084,11 +1244,11 @@ class TrajPlayerWindow(QMainWindow):
         label_width = max(
             76,
             self.filter_value_label.fontMetrics().horizontalAdvance(f"Atom {largest_index}") + 6,
-            self.filter_value_label.fontMetrics().horizontalAdvance(f"Chain {largest_index}") + 6,
         )
         self.filter_value_label.setFixedWidth(label_width)
         self.filter_mode = "all"
-        self.filter_values = {"chain": 1, "atom": 1}
+        self.filter_values = {"atom": 1}
+        self.selected_chains = (1,)
         self.filter_mode_buttons["all"].setChecked(True)
         self.filter_mode_buttons["all"].setEnabled(enabled)
         self.filter_mode_buttons["atom"].setEnabled(enabled)
@@ -1101,38 +1261,29 @@ class TrajPlayerWindow(QMainWindow):
         self.filter_value_slider.setToolTip("All atoms are visible")
         self.filter_value_label.setText("All atoms")
         self.filter_value_label.setEnabled(False)
+        self.chain_selection_edit.blockSignals(True)
+        self.chain_selection_edit.setText("1")
+        self.chain_selection_edit.blockSignals(False)
+        self._set_chain_selection_invalid(False)
+        self._set_filter_value_control_mode("all")
 
     def on_filter_mode_changed(self, mode: str) -> None:
         if self.store is None:
             return
         mode = str(mode)
+        if mode == "chain" and self.component_sizes.size == 0:
+            mode = "all"
+            self.status_bar.showMessage("Chain groups are still being prepared")
+
+        self.filter_mode = mode if mode in {"all", "chain", "atom"} else "atom"
+        self.filter_mode_buttons[self.filter_mode].setChecked(True)
         self.filter_value_slider.blockSignals(True)
-        if mode == "all":
-            self.filter_mode = "all"
-            self.filter_mode_buttons["all"].setChecked(True)
+        if self.filter_mode == "all":
             self.filter_value_slider.setEnabled(False)
             self.filter_value_label.setText("All atoms")
             self.filter_value_label.setEnabled(False)
             self.filter_value_slider.setToolTip("All atoms are visible")
-        elif mode == "chain":
-            if self.component_sizes.size == 0:
-                self.filter_mode = "all"
-                self.filter_mode_buttons["all"].setChecked(True)
-                self.filter_value_slider.setEnabled(False)
-                self.filter_value_label.setText("All atoms")
-                self.filter_value_label.setEnabled(False)
-                self.status_bar.showMessage("Chain groups are still being prepared")
-                self.filter_value_slider.blockSignals(False)
-                return
-            self.filter_mode = "chain"
-            maximum = int(self.component_sizes.shape[0])
-            self.filter_value_slider.setRange(1, maximum)
-            self.filter_value_slider.setPageStep(1)
-            self.filter_value_slider.setValue(min(self.filter_values["chain"], maximum))
-            self.filter_value_slider.setEnabled(True)
-            self.filter_value_label.setEnabled(True)
-        else:
-            self.filter_mode = "atom"
+        elif self.filter_mode == "atom":
             maximum = self.store.atom_count
             self.filter_value_slider.setRange(1, maximum)
             self.filter_value_slider.setPageStep(max(1, maximum // 100))
@@ -1140,24 +1291,61 @@ class TrajPlayerWindow(QMainWindow):
             self.filter_value_slider.setEnabled(True)
             self.filter_value_label.setEnabled(True)
         self.filter_value_slider.blockSignals(False)
+        self._set_filter_value_control_mode(self.filter_mode)
+        self.update_filter_value_label()
+        self.schedule_visibility_filter()
+        if self.filter_mode == "chain":
+            self.chain_selection_edit.setFocus()
+            self.chain_selection_edit.selectAll()
+
+    def on_filter_value_changed(self, value: int) -> None:
+        if self.filter_mode == "atom":
+            self.filter_values["atom"] = int(value)
         self.update_filter_value_label()
         self.schedule_visibility_filter()
 
-    def on_filter_value_changed(self, value: int) -> None:
-        if self.filter_mode in self.filter_values:
-            self.filter_values[self.filter_mode] = int(value)
-        self.update_filter_value_label()
-        self.schedule_visibility_filter()
+    def on_chain_selection_changed(self, _text: str) -> None:
+        if self.filter_mode == "chain":
+            self.schedule_visibility_filter()
+
+    def normalize_chain_selection(self) -> None:
+        if self.component_sizes.size == 0:
+            return
+        try:
+            chains = parse_chain_selection(
+                self.chain_selection_edit.text(),
+                int(self.component_sizes.shape[0]),
+            )
+        except ChainSelectionError:
+            return
+        normalized = format_chain_selection(chains)
+        if normalized != self.chain_selection_edit.text():
+            self.chain_selection_edit.setText(normalized)
+
+    def _set_filter_value_control_mode(self, mode: str) -> None:
+        chain_mode = mode == "chain"
+        self.chain_selection_edit.setVisible(chain_mode)
+        self.chain_selection_edit.setEnabled(chain_mode)
+        self.filter_value_slider.setVisible(not chain_mode)
+        self.filter_value_label.setVisible(not chain_mode)
+
+    def _set_chain_selection_invalid(self, invalid: bool) -> None:
+        if bool(self.chain_selection_edit.property("invalid")) == bool(invalid):
+            return
+        self.chain_selection_edit.setProperty("invalid", bool(invalid))
+        style = self.chain_selection_edit.style()
+        style.unpolish(self.chain_selection_edit)
+        style.polish(self.chain_selection_edit)
+        self.chain_selection_edit.update()
 
     def update_filter_value_label(self) -> None:
         if self.filter_mode == "all":
             self.filter_value_label.setText("All atoms")
             return
         value = self.filter_value_slider.value()
-        title = "Chain" if self.filter_mode == "chain" else "Atom"
-        self.filter_value_label.setText(f"{title} {value}")
+        self.filter_value_label.setText(f"Atom {value}")
         self.filter_value_slider.setToolTip(
-            f"{title} {value} of {self.filter_value_slider.maximum()}"
+            f"Atom {value} of {self.filter_value_slider.maximum()}"
         )
 
     def schedule_visibility_filter(self, _value: int | None = None) -> None:
@@ -1171,23 +1359,46 @@ class TrajPlayerWindow(QMainWindow):
         if mode == "all":
             visible_atoms = None
             message = f"Showing all {self.store.atom_count} atoms"
+            unwrap_group_ids = None
+            self._set_chain_selection_invalid(False)
         elif mode == "chain":
-            component_index = self.filter_value_slider.value() - 1
-            if component_index < 0 or component_index >= self.component_sizes.shape[0]:
+            try:
+                chains = parse_chain_selection(
+                    self.chain_selection_edit.text(),
+                    int(self.component_sizes.shape[0]),
+                )
+            except ChainSelectionError as exc:
+                self._set_chain_selection_invalid(True)
+                self.status_bar.showMessage(f"Invalid chain selection: {exc}")
                 return
-            visible_atoms = np.flatnonzero(self.component_ids == component_index).astype(
+            self._set_chain_selection_invalid(False)
+            self.selected_chains = chains
+            selected_components = np.zeros(
+                self.component_sizes.shape[0],
+                dtype=np.bool_,
+            )
+            selected_components[np.asarray(chains, dtype=np.int32) - 1] = True
+            visible_atoms = np.flatnonzero(
+                selected_components[self.component_ids]
+            ).astype(
                 np.int32,
                 copy=False,
             )
-            message = f"Showing chain {component_index + 1}: {len(visible_atoms)} atoms"
+            selection_text = format_chain_selection(chains)
+            noun = "chain" if len(chains) == 1 else "chains"
+            message = f"Showing {noun} {selection_text}: {len(visible_atoms)} atoms"
+            unwrap_group_ids = self.component_ids
         else:
             atom_index = self.filter_value_slider.value() - 1
             visible_atoms = np.array([atom_index], dtype=np.int32)
             message = f"Showing atom {atom_index + 1}"
+            unwrap_group_ids = None
+            self._set_chain_selection_invalid(False)
         self.gl_view.set_visible_atoms(
             visible_atoms,
             fit_view=self.displayed_frame >= 0,
             unwrap_periodic=mode == "chain",
+            unwrap_group_ids=unwrap_group_ids,
         )
         self.status_bar.showMessage(message)
 
@@ -1196,8 +1407,20 @@ class TrajPlayerWindow(QMainWindow):
         self.trajectory_generation += 1
         self.gl_view.set_bonds(np.empty((0, 2), dtype=np.int32))
         if store.metadata.get("synthetic"):
+            self.bond_topology = empty_topology(BondSource.GENERATED)
+            self.update_trajectory_info()
             self.status_bar.showMessage("Synthetic benchmark loaded without bond inference")
             return
+        if not self.infer_bonds_check.isChecked():
+            self.bond_topology = empty_topology()
+            self.update_trajectory_info()
+            return
+
+        self.bond_topology = empty_topology(BondSource.INFERENCE_PENDING)
+        self.component_ids = self.bond_topology.component_ids
+        self.component_sizes = self.bond_topology.component_sizes
+        self.filter_mode_buttons["chain"].setEnabled(False)
+        self.update_trajectory_info()
 
         first_frame = np.ascontiguousarray(store.frame(0), dtype=np.float32)
         atom_numbers = np.ascontiguousarray(store.atom_numbers, dtype=np.uint16)
@@ -1228,25 +1451,29 @@ class TrajPlayerWindow(QMainWindow):
     def on_bonds_ready(
         self,
         generation: int,
-        bonds: np.ndarray,
-        component_ids: np.ndarray,
-        component_sizes: np.ndarray,
+        topology: BondTopology,
         elapsed_ms: float,
     ) -> None:
         if generation != self.trajectory_generation or self.store is None:
             return
-        self.component_ids = np.ascontiguousarray(component_ids, dtype=np.int32)
-        self.component_sizes = np.ascontiguousarray(component_sizes, dtype=np.int32)
-        self.filter_mode_buttons["chain"].setEnabled(self.component_sizes.size > 0)
-        self.gl_view.set_bonds(bonds)
+        self.bond_topology = topology
+        self.component_ids = topology.component_ids
+        self.component_sizes = topology.component_sizes
+        self.filter_mode_buttons["chain"].setEnabled(
+            topology.chain_selection_available
+        )
+        self.gl_view.set_bonds(topology.bonds)
         self.update_trajectory_info()
         self.status_bar.showMessage(
-            f"Bonds ready: {len(bonds)} bonds, {len(self.component_sizes)} chains in {elapsed_ms:.0f} ms"
+            f"Bonds ready: {len(topology.bonds)} inferred from frame 1, "
+            f"{len(self.component_sizes)} components in {elapsed_ms:.0f} ms"
         )
 
     def on_bonds_failed(self, generation: int, message: str) -> None:
         if generation != self.trajectory_generation:
             return
+        self.bond_topology = empty_topology(BondSource.INFERENCE_FAILED)
+        self.update_trajectory_info()
         self.status_bar.showMessage(message)
 
     def on_bond_thread_finished(self, thread: object) -> None:
@@ -1380,20 +1607,30 @@ class TrajPlayerWindow(QMainWindow):
         self.cache_build_in_progress = False
         self.stop_bond_inference(wait_ms=0)
         self.trajectory_generation += 1
-        if self.streamer is not None:
-            self.streamer.stop()
+        streamer = self.streamer
+        store = self.store
+        if streamer is not None:
+            if not streamer.stop(timeout_s=0.0) and store is not None:
+                self._retired_streamers[streamer] = store
+                self.retired_streamer_timer.start()
             self.streamer = None
         if self.store is not None:
-            if self.store is not deferred_store:
+            if (
+                self.store is not deferred_store
+                and self.store not in self._retired_streamers.values()
+            ):
                 self.store.close()
             self.store = None
         self.gl_view.set_cell(None)
         self.box_check.setEnabled(False)
+        self.infer_bonds_check.setEnabled(False)
         self.set_representation_controls_enabled(False)
         self.component_ids = np.empty((0,), dtype=np.int32)
         self.component_sizes = np.empty((0,), dtype=np.int32)
+        self.bond_topology = empty_topology()
         self.filter_mode = "all"
-        self.filter_values = {"chain": 1, "atom": 1}
+        self.filter_values = {"atom": 1}
+        self.selected_chains = (1,)
         self.filter_mode_buttons["all"].setChecked(True)
         for button in self.filter_mode_buttons.values():
             button.setEnabled(False)
@@ -1405,6 +1642,11 @@ class TrajPlayerWindow(QMainWindow):
         self.filter_value_label.setText("All atoms")
         self.filter_value_label.setFixedWidth(76)
         self.filter_value_label.setEnabled(False)
+        self.chain_selection_edit.blockSignals(True)
+        self.chain_selection_edit.setText("1")
+        self.chain_selection_edit.blockSignals(False)
+        self._set_chain_selection_invalid(False)
+        self._set_filter_value_control_mode("all")
         self.current_frame = 0
         self.displayed_frame = -1
         self.scrub_preview_timer.stop()
@@ -1412,6 +1654,17 @@ class TrajPlayerWindow(QMainWindow):
         self.slider_scrub.release(0)
         self.frame_slider.setMaximum(0)
         self.frame_slider.setValue(0)
+
+    def reap_retired_streamers(self) -> None:
+        for streamer, store in tuple(self._retired_streamers.items()):
+            if streamer.is_alive:
+                continue
+            streamer.stop(timeout_s=0.0)
+            self._retired_streamers.pop(streamer, None)
+            if store not in self._retired_open_stores.values():
+                store.close()
+        if not self._retired_streamers:
+            self.retired_streamer_timer.stop()
 
     def set_controls_enabled(self, enabled: bool) -> None:
         self.prev_button.setEnabled(enabled)
@@ -1486,6 +1739,12 @@ class TrajPlayerWindow(QMainWindow):
             return
         self.on_render_tick()
 
+    def on_stream_failed(self, streamer: object, message: str) -> None:
+        if streamer is not self.streamer:
+            return
+        self.set_controls_enabled(False)
+        self.show_error(message)
+
     def request_stream_frame(
         self,
         frame_index: int,
@@ -1501,6 +1760,8 @@ class TrajPlayerWindow(QMainWindow):
             direction = 1 if delta > 0 else -1 if delta < 0 else 0
         self.last_stream_seek_frame = target
         self.streamer.seek(target, direction=direction, interactive=interactive)
+        if self.streamer.get_frame(target) is not None:
+            self.render_timer.start(0)
         thread = self.open_thread
         if (
             self.store is not None
@@ -1542,20 +1803,20 @@ class TrajPlayerWindow(QMainWindow):
         self.set_play_button_state(False)
         if self.benchmark_output is None:
             self.gl_view.set_immediate_paint(False)
-            self.render_timer.setInterval(self.IDLE_RENDER_TIMER_MS)
+            self.render_timer.stop()
 
     def schedule_next_render_tick(self) -> None:
         if self.playback is None or not self.playback.running:
-            self.render_timer.setInterval(self.IDLE_RENDER_TIMER_MS)
+            self.render_timer.stop()
             return
         if self.displayed_frame != self.current_frame:
-            self.render_timer.setInterval(self.IDLE_RENDER_TIMER_MS)
+            self.render_timer.stop()
             return
         delay_s = self.playback.next_frame_delay_s(time.perf_counter())
         if delay_s is None:
-            self.render_timer.setInterval(self.IDLE_RENDER_TIMER_MS)
+            self.render_timer.stop()
             return
-        self.render_timer.setInterval(max(1, int(math.floor(delay_s * 1000.0))))
+        self.render_timer.start(max(1, int(math.ceil(delay_s * 1000.0))))
 
     def on_playback_speed_changed(self, value: int) -> None:
         self.playback_speed_value_label.setText(f"{int(value)} FPS")
@@ -1701,27 +1962,50 @@ class TrajPlayerWindow(QMainWindow):
 
     def show_error(self, message: str) -> None:
         self.stop_playback()
+        print(f"[error] {message}", flush=True)
+        if self.automation_mode:
+            self.status_bar.showMessage("Error")
+            self.error_reported.emit(message)
+            return
         QMessageBox.critical(self, "TrajPlayer", message)
         self.status_bar.showMessage("Error")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._pending_open_source = None
         self.close_current_trajectory()
+        self.retired_streamer_timer.stop()
+        shutdown_deadline = time.monotonic() + 5.0
         retired = tuple(self._retired_open_stores)
         for thread in retired:
             thread.cancel()
         for thread in retired:
-            thread.wait()
-        for store in self._retired_open_stores.values():
-            if store is not None:
+            remaining_ms = max(0, int((shutdown_deadline - time.monotonic()) * 1000.0))
+            if not thread.wait(remaining_ms):
+                print("[shutdown] trajectory worker did not stop before deadline", flush=True)
+        for streamer in tuple(self._retired_streamers):
+            remaining_s = max(0.0, shutdown_deadline - time.monotonic())
+            if not streamer.stop(timeout_s=remaining_s):
+                print("[shutdown] frame streamer did not stop before deadline", flush=True)
+        for store in set(self._retired_open_stores.values()) | set(
+            self._retired_streamers.values()
+        ):
+            if store is not None and not any(
+                worker.isRunning()
+                for worker, worker_store in self._retired_open_stores.items()
+                if worker_store is store
+            ) and not any(
+                worker.is_alive
+                for worker, worker_store in self._retired_streamers.items()
+                if worker_store is store
+            ):
                 store.close()
-        self._retired_open_stores.clear()
         self.stop_bond_inference(wait_ms=0)
         for thread in tuple(self._retired_bond_threads):
             thread.requestInterruption()
         for thread in tuple(self._retired_bond_threads):
-            thread.wait()
-        self._retired_bond_threads.clear()
+            remaining_ms = max(0, int((shutdown_deadline - time.monotonic()) * 1000.0))
+            if not thread.wait(remaining_ms):
+                print("[shutdown] bond worker did not stop before deadline", flush=True)
         self.gl_view.cleanup()
         super().closeEvent(event)
 
@@ -1730,6 +2014,22 @@ def main() -> None:
     cli_args = parse_cli_args(sys.argv[1:])
     if cli_args.startup_smoke:
         return
+    if cli_args.doctor_output is not None:
+        report = diagnostics_json(
+            opengl=probe_opengl(),
+            log_path=error_log_path(),
+        )
+        try:
+            cli_args.doctor_output.parent.mkdir(parents=True, exist_ok=True)
+            cli_args.doctor_output.write_text(report + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"[doctor] failed to write diagnostics: {exc}", flush=True)
+            raise SystemExit(2) from exc
+        print(f"[doctor] wrote {cli_args.doctor_output}", flush=True)
+        return
+    if cli_args.gui_smoke and not cli_args.paths:
+        print("[gui-smoke] a trajectory path is required", flush=True)
+        raise SystemExit(2)
     benchmark_store: BinaryTrajectoryStore | None = None
     benchmark_label: Path | None = None
     benchmark_metrics: dict[str, object] = {}
@@ -1737,9 +2037,20 @@ def main() -> None:
         benchmark_store, benchmark_label, benchmark_metrics = prepare_benchmark_store(cli_args)
 
     QSurfaceFormat.setDefaultFormat(default_surface_format())
-    app = QApplication(sys.argv)
+    app = TrajPlayerApplication(sys.argv)
     window = TrajPlayerWindow()
     window.show()
+    app.set_file_open_handler(
+        window.queue_external_open_path,
+        replay_pending=not bool(cli_args.paths),
+    )
+    if cli_args.gui_smoke:
+        window.gui_smoke_controller = GuiSmokeController(
+            window,
+            timeout_ms=cli_args.gui_smoke_timeout_ms,
+            output_path=cli_args.gui_smoke_output,
+        )
+        window.gui_smoke_controller.start()
     if benchmark_store is not None and benchmark_label is not None and cli_args.benchmark_output is not None:
         QTimer.singleShot(
             100,
