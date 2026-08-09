@@ -1,9 +1,53 @@
 {
-  "version": "v0.1.0-alpha.5",
+  "version": "v0.1.0-alpha.6",
   "platforms": {
-    "Windows-x64": 253678554,
-    "Linux-x86_64": 364865166,
-    "macOS-arm64": 182246066,
-    "macOS-x86_64": 197305386
+    "Windows-x64": {
+      "total_bytes": 166682637,
+      "groups": {
+        "Qt": 106605385,
+        "Chemfiles": 2845662,
+        "NumPy": 27829002,
+        "ASE": 609,
+        "TrajPlayer": 4331294,
+        "Licenses and docs": 53591,
+        "Other": 25017094
+      }
+    },
+    "Linux-x86_64": {
+      "total_bytes": 255837784,
+      "groups": {
+        "Qt": 133229301,
+        "Chemfiles": 3897566,
+        "NumPy": 42788754,
+        "ASE": 609,
+        "TrajPlayer": 4094360,
+        "Licenses and docs": 52655,
+        "Other": 71774539
+      }
+    },
+    "macOS-arm64": {
+      "total_bytes": 131209377,
+      "groups": {
+        "Qt": 92288273,
+        "Chemfiles": 3585190,
+        "NumPy": 6921956,
+        "ASE": 609,
+        "TrajPlayer": 28357189,
+        "Licenses and docs": 52686,
+        "Other": 3474
+      }
+    },
+    "macOS-x86_64": {
+      "total_bytes": 139073747,
+      "groups": {
+        "Qt": 95942481,
+        "Chemfiles": 4028582,
+        "NumPy": 10637444,
+        "ASE": 609,
+        "TrajPlayer": 28408471,
+        "Licenses and docs": 52686,
+        "Other": 3474
+      }
+    }
   }
 }

@@ -11,6 +11,79 @@ from trajplayer.streaming import FrameStreamer
 
 
 class FrameStreamerTests(unittest.TestCase):
+    def test_prefetch_respects_dynamic_target_before_latency_samples_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with BinaryTrajectoryStore.create(
+                Path(tmp) / "target.tpdata",
+                frame_count=100,
+                atom_numbers=np.array([1], dtype=np.uint16),
+                symbols=["H"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+            ) as store:
+                streamer = FrameStreamer(store, prefetch_radius=200)
+                streamer._memory_target_capacity = 2
+
+                self.assertEqual(streamer.target_window_count(50), 2)
+
+    def test_slab_cache_grows_for_prefetch_and_shrinks_for_interactive_seek(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with BinaryTrajectoryStore.create(
+                Path(tmp) / "slabs.tpdata",
+                frame_count=100,
+                atom_numbers=np.array([1], dtype=np.uint16),
+                symbols=["H"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+            ) as store:
+                streamer = FrameStreamer(
+                    store,
+                    prefetch_radius=200,
+                    max_memory_bytes=1200,
+                    interactive_prefetch_frames=2,
+                    slab_target_bytes=24,
+                    initial_cache_bytes=36,
+                )
+                try:
+                    self.assertEqual(streamer.capacity, 100)
+                    self.assertEqual(streamer.allocated_capacity, 4)
+                    self.assertEqual(streamer.memory_bytes, 48)
+                    streamer.start()
+                    streamer.seek(0)
+                    first = streamer.wait_for_lease(0, timeout_s=2.0)
+                    self.assertIsNotNone(first)
+                    assert first is not None
+                    first.release()
+
+                    streamer.seek(50, direction=1)
+                    middle = streamer.wait_for_lease(50, timeout_s=2.0)
+                    self.assertIsNotNone(middle)
+                    assert middle is not None
+                    middle.release()
+                    deadline = time.monotonic() + 2.0
+                    while time.monotonic() < deadline and streamer.allocated_capacity < 6:
+                        time.sleep(0.005)
+                    self.assertGreaterEqual(streamer.allocated_capacity, 6)
+
+                    streamer.seek(90, direction=1, interactive=True)
+                    last = streamer.wait_for_lease(90, timeout_s=2.0)
+                    self.assertIsNotNone(last)
+                    assert last is not None
+                    last.release()
+                    deadline = time.monotonic() + 2.0
+                    while time.monotonic() < deadline and streamer.allocated_capacity > 2:
+                        time.sleep(0.005)
+                    self.assertEqual(streamer.allocated_capacity, 2)
+                    self.assertEqual(streamer.memory_bytes, 24)
+                    stats = streamer.stats_snapshot()
+                    self.assertEqual(stats.max_capacity, 100)
+                    self.assertEqual(stats.allocated_capacity, 2)
+                    self.assertEqual(stats.slab_count, 1)
+                finally:
+                    streamer.stop()
+
     def test_memory_budget_caps_large_prefetch_windows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with BinaryTrajectoryStore.create(
@@ -58,7 +131,10 @@ class FrameStreamerTests(unittest.TestCase):
                 try:
                     streamer.start()
                     streamer.seek(7, direction=1, interactive=True)
-                    self.assertIsNotNone(streamer.wait_for_frame(7, timeout_s=2.0))
+                    lease = streamer.wait_for_lease(7, timeout_s=2.0)
+                    self.assertIsNotNone(lease)
+                    assert lease is not None
+                    lease.release()
                     deadline = time.monotonic() + 2.0
                     while time.monotonic() < deadline and not ready:
                         time.sleep(0.01)
@@ -89,10 +165,13 @@ class FrameStreamerTests(unittest.TestCase):
                 try:
                     streamer.start()
                     streamer.seek(0)
-                    self.assertIsNotNone(streamer.wait_for_frame(0, timeout_s=2.0))
-                    lease = streamer.acquire_frame(0)
+                    lease = streamer.wait_for_lease(0, timeout_s=2.0)
                     self.assertIsNotNone(lease)
+                    assert lease is not None
                     expected = lease.positions.copy()
+                    self.assertFalse(lease.positions.flags.writeable)
+                    with self.assertRaises(ValueError):
+                        lease.positions[0, 0] = -1.0
 
                     streamer.seek(1)
                     time.sleep(0.05)
@@ -101,8 +180,16 @@ class FrameStreamerTests(unittest.TestCase):
 
                     lease.release()
                     lease.release()
-                    self.assertIsNotNone(streamer.wait_for_frame(1, timeout_s=2.0))
+                    next_lease = streamer.wait_for_lease(1, timeout_s=2.0)
+                    self.assertIsNotNone(next_lease)
+                    assert next_lease is not None
+                    next_lease.release()
                     self.assertTrue(streamer.has_frame(1))
+                    stats = streamer.stats_snapshot()
+                    self.assertEqual(stats.active_leases, 0)
+                    self.assertEqual(stats.lease_acquisitions, stats.lease_releases)
+                    self.assertGreaterEqual(stats.peak_active_leases, 1)
+                    self.assertEqual(stats.stale_lease_releases, 0)
                 finally:
                     streamer.stop()
 
@@ -126,10 +213,12 @@ class FrameStreamerTests(unittest.TestCase):
                 try:
                     streamer.start()
                     streamer.seek(4)
-                    frame = streamer.wait_for_frame(4, timeout_s=2.0)
-                    self.assertIsNotNone(frame)
-                    np.testing.assert_array_equal(frame, store.frame(4))
-                    np.testing.assert_array_equal(streamer.get_cell(4), store.cell(4))
+                    lease = streamer.wait_for_lease(4, timeout_s=2.0)
+                    self.assertIsNotNone(lease)
+                    assert lease is not None
+                    np.testing.assert_array_equal(lease.positions, store.frame(4))
+                    np.testing.assert_array_equal(lease.cell, store.cell(4))
+                    lease.release()
 
                     deadline = time.monotonic() + 2.0
                     while time.monotonic() < deadline:
@@ -182,7 +271,10 @@ class FrameStreamerTests(unittest.TestCase):
                     self.assertFalse(streamer.is_window_ready(3))
                     streamer.start()
                     streamer.seek(3)
-                    self.assertIsNotNone(streamer.wait_for_frame(3, timeout_s=2.0))
+                    lease = streamer.wait_for_lease(3, timeout_s=2.0)
+                    self.assertIsNotNone(lease)
+                    assert lease is not None
+                    lease.release()
                     deadline = time.monotonic() + 2.0
                     while time.monotonic() < deadline and not streamer.is_window_ready(3):
                         time.sleep(0.01)
@@ -205,7 +297,10 @@ class FrameStreamerTests(unittest.TestCase):
                 try:
                     streamer.start()
                     streamer.seek(0)
-                    self.assertIsNotNone(streamer.wait_for_frame(0, timeout_s=2.0))
+                    lease = streamer.wait_for_lease(0, timeout_s=2.0)
+                    self.assertIsNotNone(lease)
+                    assert lease is not None
+                    lease.release()
                     streamer.seek(0)
                     stats = streamer.stats_snapshot()
 
@@ -213,6 +308,11 @@ class FrameStreamerTests(unittest.TestCase):
                     self.assertGreaterEqual(stats.cache_hits, 1)
                     self.assertGreaterEqual(stats.cache_misses, 1)
                     self.assertGreater(stats.load_latency_ms, 0.0)
+                    self.assertGreater(stats.read_latency_ms_p50, 0.0)
+                    self.assertGreaterEqual(
+                        stats.read_latency_ms_p99,
+                        stats.read_latency_ms_p50,
+                    )
                     self.assertGreater(stats.decoded_megabytes, 0.0)
                     self.assertGreater(stats.decode_megabytes_per_second, 0.0)
                     self.assertEqual(stats.effective_prefetch_frames, 1)
@@ -247,7 +347,7 @@ class FrameStreamerTests(unittest.TestCase):
                 self.assertEqual(len(errors), 1)
                 self.assertIsInstance(errors[0], OSError)
                 self.assertIs(streamer.error, errors[0])
-                self.assertIsNone(streamer.wait_for_frame(0, timeout_s=0.1))
+                self.assertIsNone(streamer.wait_for_lease(0, timeout_s=0.1))
                 self.assertTrue(streamer.stop())
 
     def test_stop_keeps_thread_owned_until_blocking_read_finishes(self) -> None:

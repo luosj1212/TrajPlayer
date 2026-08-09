@@ -1,4 +1,7 @@
+import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -15,10 +18,87 @@ from trajplayer.random_access_cache import (
     write_reader_frame,
 )
 from trajplayer.trajectory_source import TrajectorySource
-from trajplayer.xyz_index import ProgressiveXyzIndex
+from trajplayer.xyz_index import IndexIoCoordinator, ProgressiveXyzIndex
 
 
 class RandomAccessCacheTests(unittest.TestCase):
+    def test_xyz_index_resumes_from_an_incomplete_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "resume.extxyz"
+            frames = [
+                Atoms("HC", positions=[[index, 0.0, 0.0], [0.0, index, 0.0]])
+                for index in range(500)
+            ]
+            write(source, frames, format="extxyz")
+            cache_root = root / "resume.tpindex"
+            coordinator = IndexIoCoordinator(
+                resume_grace_s=0.0,
+                background_throttle_s=0.002,
+            )
+
+            with (
+                patch("trajplayer.xyz_index.INDEX_CHUNK_BYTES", 128),
+                patch("trajplayer.xyz_index.INDEX_CHECKPOINT_BYTES", 256),
+            ):
+                index = ProgressiveXyzIndex(
+                    source,
+                    cache_root,
+                    atom_count=2,
+                    io_coordinator=coordinator,
+                )
+                index.start()
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and index.scan_offset < 256:
+                    time.sleep(0.005)
+                self.assertGreaterEqual(index.scan_offset, 256)
+                self.assertFalse(index.complete)
+                index.close()
+
+            checkpoint = json.loads(
+                (cache_root / "frame_index.json").read_text(encoding="utf-8")
+            )
+            resume_offset = int(checkpoint["scan_offset"])
+            self.assertGreater(resume_offset, 0)
+            self.assertFalse(checkpoint["complete"])
+
+            resumed = ProgressiveXyzIndex(source, cache_root, atom_count=2)
+            try:
+                self.assertEqual(resumed.scan_offset, resume_offset)
+                resumed.start()
+                self.assertEqual(resumed.wait_until_complete(), len(frames))
+                self.assertTrue(resumed.complete)
+                self.assertEqual(resumed.offset(len(frames) - 1) > 0, True)
+            finally:
+                resumed.close()
+
+    def test_xyz_index_qos_pauses_until_foreground_grace_period_ends(self) -> None:
+        coordinator = IndexIoCoordinator(
+            resume_grace_s=0.04,
+            background_throttle_s=0.0,
+        )
+        stop_event = threading.Event()
+        background_ready = threading.Event()
+
+        with coordinator.foreground():
+            thread = threading.Thread(
+                target=lambda: (
+                    coordinator.wait_for_background_turn(stop_event)
+                    and background_ready.set()
+                )
+            )
+            thread.start()
+            time.sleep(0.02)
+            self.assertFalse(background_ready.is_set())
+
+        self.assertFalse(background_ready.wait(timeout=0.015))
+        self.assertTrue(background_ready.wait(timeout=0.2))
+        thread.join(timeout=1.0)
+        stats = coordinator.stats_snapshot()
+        self.assertEqual(stats.foreground_reads, 1)
+        self.assertGreaterEqual(stats.pause_count, 1)
+        self.assertGreater(stats.paused_seconds, 0.04)
+
     def test_extxyz_direct_store_exposes_first_frame_before_index_scan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "progressive.extxyz"

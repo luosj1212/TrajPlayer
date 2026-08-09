@@ -20,7 +20,7 @@ from .ase_traj_reader import AseUlmTrajectoryReader
 from .structure_reader import read_structure
 from .trajectory_source import TrajectorySource
 from .xyz_reader import read_xyz_frame
-from .xyz_index import FRAME_OFFSETS_FILE, ProgressiveXyzIndex
+from .xyz_index import FRAME_OFFSETS_FILE, IndexIoCoordinator, ProgressiveXyzIndex
 
 
 RANDOM_ACCESS_SUFFIXES = frozenset(
@@ -389,14 +389,17 @@ class _IndexedXyzReader:
             if index_progress_callback is not None:
                 index_progress_callback(int(frame_count), bool(complete))
 
+        self._io_coordinator = IndexIoCoordinator()
         self._index = ProgressiveXyzIndex(
             self._path,
             cache_root,
             atom_count=atom_count,
             progress_callback=publish_progress,
+            io_coordinator=self._io_coordinator,
         )
         try:
-            first = self._read_frame(0, atom_count=atom_count)
+            with self._io_coordinator.foreground():
+                first = self._read_frame(0, atom_count=atom_count)
             self.summary = RandomAccessSummary(
                 frame_count=self._index.known_frame_count,
                 atom_count=atom_count,
@@ -417,7 +420,8 @@ class _IndexedXyzReader:
 
     def read_frame(self, frame_index: int) -> tuple[np.ndarray, np.ndarray | None]:
         index = int(frame_index)
-        frame = self._read_frame(index)
+        with self._io_coordinator.foreground():
+            frame = self._read_frame(index)
         if not np.array_equal(frame.atom_numbers, self.summary.atom_numbers):
             raise ValueError(f"Frame {index} atom ordering differs from the first frame")
         return frame.positions, frame.cell

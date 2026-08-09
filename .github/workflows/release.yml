@@ -73,7 +73,7 @@ jobs:
           --json-output bundle-size-${{ matrix.label }}.json
           --baseline-file scripts/bundle_size_baselines.json
           --platform ${{ matrix.label }}
-          --max-growth-percent 5
+          --max-growth-percent 2
 
       - name: Smoke-test Windows portable runtime
         if: runner.os == 'Windows'
@@ -123,6 +123,32 @@ jobs:
           }
           Get-Content reader-smoke.json
 
+      - name: Benchmark Windows portable runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:QT_OPENGL = "software"
+          $benchmark = Start-Process `
+            -FilePath "dist/TrajPlayer/TrajPlayer.exe" `
+            -ArgumentList @(
+              "--benchmark-output=performance-${{ matrix.label }}.json",
+              "--benchmark-atoms=100000",
+              "--benchmark-frames=64",
+              "--benchmark-render-frames=120",
+              "--benchmark-bonds",
+              "--benchmark-finish-gpu"
+            ) `
+            -PassThru
+          if (-not $benchmark.WaitForExit(180000)) {
+            Stop-Process -Id $benchmark.Id -Force
+            throw "Portable benchmark timed out."
+          }
+          if ($benchmark.ExitCode -ne 0) {
+            Get-Content "dist/TrajPlayer/traj_player_error.log" -ErrorAction SilentlyContinue
+            throw "Portable benchmark failed with code $($benchmark.ExitCode)."
+          }
+          python scripts/check_perf_report.py "performance-${{ matrix.label }}.json"
+
       - name: Smoke-test Linux portable runtime
         if: runner.os == 'Linux'
         env:
@@ -133,6 +159,14 @@ jobs:
           cat reader-smoke.json
           xvfb-run -a ./dist/TrajPlayer/TrajPlayer --gui-smoke --gui-smoke-timeout-ms=20000 --gui-smoke-output=gui-smoke.json examples/c60.extxyz
           cat gui-smoke.json
+
+      - name: Benchmark Linux portable runtime
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          xvfb-run -a ./dist/TrajPlayer/TrajPlayer --benchmark-output=performance-${{ matrix.label }}.json --benchmark-atoms=100000 --benchmark-frames=64 --benchmark-render-frames=120 --benchmark-bonds --benchmark-finish-gpu
+          python scripts/check_perf_report.py performance-${{ matrix.label }}.json
 
       - name: Smoke-test macOS app bundle
         if: runner.os == 'macOS'
@@ -146,6 +180,14 @@ jobs:
           cat gui-smoke.json
           codesign --verify --deep --strict dist/TrajPlayer-macOS/TrajPlayer.app
 
+      - name: Benchmark macOS app bundle
+        if: runner.os == 'macOS'
+        env:
+          QT_QPA_PLATFORM: cocoa
+        run: |
+          ./dist/TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer --benchmark-output=performance-${{ matrix.label }}.json --benchmark-atoms=100000 --benchmark-frames=64 --benchmark-render-frames=120 --benchmark-bonds --benchmark-finish-gpu
+          python scripts/check_perf_report.py performance-${{ matrix.label }}.json
+
       - name: Upload package artifact
         if: always()
         uses: actions/upload-artifact@v7
@@ -157,6 +199,7 @@ jobs:
             TrajPlayer-*.tar.gz
             TrajPlayer-*.tar.gz.sha256
             bundle-size-*.json
+            performance-*.json
           if-no-files-found: warn
 
   publish:

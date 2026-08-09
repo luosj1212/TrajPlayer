@@ -55,14 +55,18 @@ class GuiSmokeController(QObject):
             return
 
         if self.stage == "first_frame":
-            try:
-                self.first_frame_metrics = framebuffer_metrics(gl_view.grabFramebuffer())
-                _validate_framebuffer(self.first_frame_metrics)
-            except Exception as exc:
-                self.fail(f"First OpenGL frame validation failed: {exc}")
-                return
-            if store.frame_count < 2:
-                self.fail("GUI smoke trajectory must contain at least two frames")
+            if self.first_frame_metrics is None:
+                try:
+                    self.first_frame_metrics = framebuffer_metrics(
+                        gl_view.grabFramebuffer()
+                    )
+                    _validate_framebuffer(self.first_frame_metrics)
+                except Exception as exc:
+                    self.fail(f"First OpenGL frame validation failed: {exc}")
+                    return
+            if store.navigable_frame_count < 2:
+                if store.frame_count_is_final:
+                    self.fail("GUI smoke trajectory must contain at least two frames")
                 return
             self.stage = "second_frame"
             self.window.step_next()

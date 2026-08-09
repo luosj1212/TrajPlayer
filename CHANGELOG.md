@@ -5,6 +5,27 @@ All notable changes to TrajPlayer are documented here. The project follows
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced the window-owned present queue state with a generation-safe
+  `PresentScheduler` while retaining sequential, no-skip playback
+- Made frame leases read-only and epoch checked, deprecated unleased frame
+  getters, and added acquisition/release/stale-reference diagnostics
+- Added foreground-priority XYZ indexing I/O, resumable atomic checkpoints, and
+  throttled background scanning
+- Changed the RAM frame cache to dynamically allocated slabs with pressure-aware
+  shrink/grow hysteresis and Linux cgroup awareness
+- Added bounded p50/p95/p99 telemetry for render, upload, present, depth-sort,
+  frame-read, process-memory, and renderer-copy behavior
+- Added a 256-bin coarse depth order for million-atom scenes to bound post-input
+  sorting latency without changing atom or bond appearance
+- Added performance report validation/comparison tools and performance artifacts
+  to cross-platform release builds
+- Added per-library and per-file bundle forensics, duplicate binary detection,
+  Qt module/plugin allowlists, and a two-percent unexplained package growth gate
+- Deferred nonessential backend, diagnostics, worker, and benchmark imports to
+  improve cold startup without changing the visible UI
+
 ## [0.1.0-alpha.6] - 2026-08-09
 
 ### Changed

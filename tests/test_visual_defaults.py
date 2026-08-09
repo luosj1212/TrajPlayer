@@ -6,6 +6,9 @@ APP_SOURCE = Path("app.py").read_text(encoding="utf-8")
 UI_SOURCE = Path("trajplayer/ui/main_window.py").read_text(encoding="utf-8")
 WORKER_SOURCE = Path("trajplayer/workers.py").read_text(encoding="utf-8")
 COMMAND_SOURCE = Path("trajplayer/commands.py").read_text(encoding="utf-8")
+PRESENT_SCHEDULER_SOURCE = Path("trajplayer/present_scheduler.py").read_text(
+    encoding="utf-8"
+)
 WINDOW_SOURCE = APP_SOURCE + UI_SOURCE
 
 
@@ -58,7 +61,8 @@ class VisualDefaultTests(unittest.TestCase):
         source = APP_SOURCE
 
         self.assertIn("self.render_timer.setSingleShot(True)", source)
-        self.assertIn("self.render_timer.start(max(1, int(math.ceil", source)
+        self.assertIn("self.present_scheduler.next_timer_delay_ms(", source)
+        self.assertIn("self.render_timer.start(delay_ms)", source)
         self.assertNotIn("self.render_timer.start()", source)
 
     def test_switching_trajectories_does_not_wait_for_stream_io_on_the_ui_thread(self) -> None:
@@ -96,8 +100,8 @@ class VisualDefaultTests(unittest.TestCase):
         renderer = Path("trajplayer/gl_view.py").read_text(encoding="utf-8")
 
         self.assertIn("self.gl_view.frameSwapped.connect(self.on_frame_swapped)", source)
-        self.assertIn("self.present_queue.begin(frame_index)", source)
-        self.assertIn("self.present_queue.acknowledge()", source)
+        self.assertIn("self.present_scheduler.submit(frame_index", source)
+        self.assertIn("self.present_scheduler.acknowledge_swap(", source)
         self.assertNotIn("set_immediate_paint", source)
         self.assertNotIn("self.repaint()", renderer)
 
@@ -120,7 +124,7 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn("SP_MediaPause", source)
         self.assertIn("SCRUB_PREVIEW_FPS = 60.0", source)
         self.assertIn("self.schedule_next_render_tick()", source)
-        self.assertIn("self.playback.next_frame_delay_s", source)
+        self.assertIn("playback.next_frame_delay_s", PRESENT_SCHEDULER_SOURCE)
         self.assertIn('transport_bar.setObjectName("transportBar")', source)
 
     def test_playback_speed_is_adjustable_without_frame_skipping(self) -> None:

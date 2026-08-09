@@ -70,6 +70,47 @@ jobs:
             throw "TrajPlayer source startup smoke test failed."
           }
 
+      - name: Build and smoke-test Windows portable runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python scripts/build_release.py
+          python scripts/report_bundle_size.py `
+            --json-output bundle-size-Windows-x64.json `
+            --baseline-file scripts/bundle_size_baselines.json `
+            --platform Windows-x64 `
+            --max-growth-percent 2
+          $smokeCases = @(
+            [pscustomobject]@{ Arguments = @("--startup-smoke") },
+            [pscustomobject]@{ Arguments = @("--native-smoke") },
+            [pscustomobject]@{ Arguments = @("--reader-smoke=smoke-fixtures", "--reader-smoke-output=portable-reader-smoke.json") }
+          )
+          foreach ($case in $smokeCases) {
+            $arguments = $case.Arguments
+            $process = Start-Process `
+              -FilePath "dist/TrajPlayer/TrajPlayer.exe" `
+              -ArgumentList $arguments `
+              -WindowStyle Hidden `
+              -PassThru
+            if (-not $process.WaitForExit(60000)) {
+              Stop-Process -Id $process.Id -Force
+              throw "Portable runtime smoke test timed out: $arguments"
+            }
+            if ($process.ExitCode -ne 0) {
+              Get-Content "dist/TrajPlayer/traj_player_error.log" -ErrorAction SilentlyContinue
+              throw "Portable runtime smoke test failed: $arguments"
+            }
+          }
+
+      - name: Upload Windows package forensics
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Windows-portable-smoke
+          path: |
+            bundle-size-Windows-x64.json
+            portable-reader-smoke.json
+
       - name: Exercise a real GUI and software OpenGL trajectory on Linux
         if: runner.os == 'Linux'
         env:
@@ -77,6 +118,21 @@ jobs:
         run: |
           xvfb-run -a python app.py --gui-smoke --gui-smoke-timeout-ms=20000 --gui-smoke-output=gui-smoke.json examples/c60.extxyz
           cat gui-smoke.json
+
+      - name: Produce Linux performance telemetry
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          xvfb-run -a python app.py --benchmark-output=performance-Linux-x86_64.json --benchmark-atoms=10000 --benchmark-frames=16 --benchmark-render-frames=30 --benchmark-bonds --benchmark-finish-gpu
+          python scripts/check_perf_report.py performance-Linux-x86_64.json
+
+      - name: Upload performance telemetry
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-Linux-x86_64
+          path: performance-Linux-x86_64.json
 
       - name: Exercise a real GUI and OpenGL trajectory on macOS
         if: runner.os == 'macOS'

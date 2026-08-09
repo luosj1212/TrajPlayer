@@ -6,6 +6,16 @@ from trajplayer import gl_view
 
 
 class GlViewDefaultsTests(unittest.TestCase):
+    def test_coarse_depth_order_is_far_to_near_without_per_atom_loops(self) -> None:
+        depth = np.linspace(-5.0, 5.0, 10000, dtype=np.float32)
+        order = gl_view.coarse_depth_order(depth)
+
+        self.assertEqual(order.shape, depth.shape)
+        self.assertEqual(int(order[0]), depth.size - 1)
+        self.assertEqual(int(order[-1]), 0)
+        self.assertTrue(np.all(np.diff(depth[order]) <= 0.0))
+        self.assertNotIn("FOR_ITER", __import__("dis").Bytecode(gl_view.coarse_depth_order).dis())
+
     def test_hidpi_viewport_uses_physical_framebuffer_pixels(self) -> None:
         self.assertEqual(gl_view.framebuffer_pixel_size(982, 551, 1.5), (1473, 827))
         self.assertEqual(gl_view.framebuffer_pixel_size(982, 551, 1.0), (982, 551))

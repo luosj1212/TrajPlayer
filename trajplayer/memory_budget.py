@@ -4,6 +4,7 @@ import ctypes
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 
 MIB = 1024 * 1024
@@ -13,6 +14,11 @@ FALLBACK_AVAILABLE_MEMORY_BYTES = 8 * 1024 * MIB
 FRAME_CACHE_MEMORY_FRACTION = 0.025
 MEMORY_BUDGET_QUANTUM_BYTES = 32 * MIB
 MIN_RESIDENT_FRAMES = 4
+PRESSURE_HEADROOM_BYTES = 512 * MIB
+DYNAMIC_CACHE_FLOOR_BYTES = 32 * MIB
+DYNAMIC_CACHE_STEP_BYTES = 32 * MIB
+DYNAMIC_GROW_HOLD_S = 5.0
+DYNAMIC_SHRINK_HOLD_S = 15.0
 
 
 @dataclass(frozen=True)
@@ -37,6 +43,100 @@ class ViewerMemoryAllocation:
     @property
     def total_bytes(self) -> int:
         return self.frame_cache.bytes + self.reserved_working_set_bytes
+
+
+@dataclass(frozen=True, slots=True)
+class MemorySnapshot:
+    available_bytes: int
+    process_rss_bytes: int
+    cache_hit_rate: float
+    decode_latency_ms: float
+    decode_mb_s: float
+    playback_fps: float
+    interactive: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetDecision:
+    target_cache_bytes: int
+    reason: str
+
+
+class MemoryBudgetPolicy:
+    """Stateful cache-byte policy with fast pressure shrink and slow hysteresis."""
+
+    def __init__(self, *, frame_bytes: int, ceiling_bytes: int) -> None:
+        self.frame_bytes = max(1, int(frame_bytes))
+        self.ceiling_bytes = max(self.frame_bytes, int(ceiling_bytes))
+        self._grow_candidate_since_s: float | None = None
+        self._shrink_candidate_since_s: float | None = None
+
+    def decide(
+        self,
+        snapshot: MemorySnapshot,
+        *,
+        current_bytes: int,
+        now_s: float,
+    ) -> BudgetDecision:
+        floor = min(
+            self.ceiling_bytes,
+            max(DYNAMIC_CACHE_FLOOR_BYTES, self.frame_bytes * MIN_RESIDENT_FRAMES),
+        )
+        current = max(floor, min(self.ceiling_bytes, int(current_bytes)))
+        available_target = max(
+            floor,
+            min(
+                self.ceiling_bytes,
+                int(max(0, snapshot.available_bytes) * FRAME_CACHE_MEMORY_FRACTION),
+            ),
+        )
+        if snapshot.available_bytes < PRESSURE_HEADROOM_BYTES:
+            self._grow_candidate_since_s = None
+            self._shrink_candidate_since_s = None
+            return BudgetDecision(
+                target_cache_bytes=max(floor, min(available_target, current // 2)),
+                reason="memory-pressure",
+            )
+
+        required_decode_mb_s = (
+            self.frame_bytes * max(1.0, snapshot.playback_fps) / MIB
+        )
+        can_grow = (
+            not snapshot.interactive
+            and snapshot.cache_hit_rate < 0.70
+            and snapshot.decode_mb_s > required_decode_mb_s * 1.2
+            and current < available_target
+        )
+        if can_grow:
+            self._shrink_candidate_since_s = None
+            if self._grow_candidate_since_s is None:
+                self._grow_candidate_since_s = float(now_s)
+            if now_s - self._grow_candidate_since_s >= DYNAMIC_GROW_HOLD_S:
+                self._grow_candidate_since_s = float(now_s)
+                return BudgetDecision(
+                    target_cache_bytes=min(
+                        available_target,
+                        current + DYNAMIC_CACHE_STEP_BYTES,
+                    ),
+                    reason="low-hit-rate-grow",
+                )
+            return BudgetDecision(current, "grow-hysteresis")
+
+        self._grow_candidate_since_s = None
+        can_shrink = snapshot.cache_hit_rate > 0.95 and current > floor
+        if can_shrink:
+            if self._shrink_candidate_since_s is None:
+                self._shrink_candidate_since_s = float(now_s)
+            if now_s - self._shrink_candidate_since_s >= DYNAMIC_SHRINK_HOLD_S:
+                self._shrink_candidate_since_s = float(now_s)
+                return BudgetDecision(
+                    target_cache_bytes=max(floor, current - DYNAMIC_CACHE_STEP_BYTES),
+                    reason="high-hit-rate-shrink",
+                )
+            return BudgetDecision(current, "shrink-hysteresis")
+
+        self._shrink_candidate_since_s = None
+        return BudgetDecision(current, "steady")
 
 
 class MemoryBudgetManager:
@@ -110,7 +210,34 @@ def available_memory_bytes() -> int | None:
         return None
     if pages <= 0 or page_size <= 0:
         return None
-    return pages * page_size
+    host_available = pages * page_size
+    cgroup_available = _cgroup_memory_available_bytes()
+    if cgroup_available is None:
+        return host_available
+    return min(host_available, cgroup_available)
+
+
+def _cgroup_memory_available_bytes(root: Path = Path("/sys/fs/cgroup")) -> int | None:
+    candidates = (
+        (root / "memory.max", root / "memory.current"),
+        (
+            root / "memory" / "memory.limit_in_bytes",
+            root / "memory" / "memory.usage_in_bytes",
+        ),
+    )
+    for limit_path, usage_path in candidates:
+        try:
+            limit_text = limit_path.read_text(encoding="ascii").strip()
+            if limit_text == "max":
+                continue
+            limit = int(limit_text)
+            usage = int(usage_path.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            continue
+        if limit <= 0 or limit >= (1 << 60):
+            continue
+        return max(0, limit - max(0, usage))
+    return None
 
 
 def estimate_viewer_working_set_bytes(atom_count: int) -> int:

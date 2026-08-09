@@ -12,6 +12,62 @@ from trajplayer import __display_version__
 
 
 extra_binaries = collect_dynamic_libs('chemfiles')
+
+QT_PLUGIN_ALLOWLIST = {
+    'win32': {
+        ('platforms', 'qwindows.dll'),
+        ('styles', 'qmodernwindowsstyle.dll'),
+    },
+    'linux': {
+        ('platforms', 'libqxcb.so'),
+        ('platforminputcontexts', 'libcomposeplatforminputcontextplugin.so'),
+        ('platforminputcontexts', 'libibusplatforminputcontextplugin.so'),
+        ('platformthemes', 'libqgtk3.so'),
+        ('platformthemes', 'libqxdgdesktopportal.so'),
+        ('xcbglintegrations', 'libqxcb-egl-integration.so'),
+        ('xcbglintegrations', 'libqxcb-glx-integration.so'),
+    },
+    'darwin': {
+        ('platforms', 'libqcocoa.dylib'),
+        ('styles', 'libqmacstyle.dylib'),
+    },
+}
+
+UNUSED_QT_MODULE_PREFIXES = (
+    'network',
+    'pdf',
+    'qml',
+    'quick',
+    'svg',
+    'virtualkeyboard',
+)
+
+
+def keep_qt_plugin(entry):
+    destination = str(entry[0]).replace('\\', '/').lower()
+    parts = tuple(part for part in destination.split('/') if part)
+    try:
+        plugin_index = parts.index('plugins')
+    except ValueError:
+        return True
+    if len(parts) <= plugin_index + 2:
+        return False
+    platform_key = 'win32' if sys.platform == 'win32' else 'darwin' if sys.platform == 'darwin' else 'linux'
+    plugin_key = (parts[plugin_index + 1], parts[-1])
+    return plugin_key in QT_PLUGIN_ALLOWLIST[platform_key]
+
+
+def keep_qt_module(entry):
+    basename = str(entry[0]).replace('\\', '/').lower().rsplit('/', 1)[-1]
+    return not any(
+        basename == f'qt{module}'
+        or basename.startswith(f'qt{module}.')
+        or basename.startswith(f'qt6{module}.')
+        or basename.startswith(f'libqt6{module}.')
+        for module in UNUSED_QT_MODULE_PREFIXES
+    )
+
+
 native_spec = find_spec('trajplayer._trajcore')
 if native_spec is None or native_spec.origin is None:
     raise RuntimeError('trajplayer._trajcore must be compiled before packaging')
@@ -43,11 +99,7 @@ a = Analysis(
     [str(project_root / 'app.py')],
     pathex=[str(project_root)],
     binaries=extra_binaries,
-    datas=[
-        ('DISTRIBUTION_README.txt', '.'),
-        ('LICENSE', '.'),
-        ('THIRD_PARTY_NOTICES.md', '.'),
-    ],
+    datas=[],
     hiddenimports=[
         'numpy._core._multiarray_umath',
         'numpy._core._multiarray_tests',
@@ -80,6 +132,12 @@ a = Analysis(
         'tkinter',
         'traitlets',
         'zmq',
+        'PySide6.QtNetwork',
+        'PySide6.QtPdf',
+        'PySide6.QtQml',
+        'PySide6.QtQuick',
+        'PySide6.QtSvg',
+        'PySide6.QtVirtualKeyboard',
     ],
     noarchive=False,
     optimize=1,
@@ -94,6 +152,15 @@ if os.name == 'nt':
             and str(entry[0]).lower().endswith('.dll')
         )
     ]
+
+a.binaries = [
+    entry for entry in a.binaries
+    if keep_qt_plugin(entry) and keep_qt_module(entry)
+]
+a.datas = [
+    entry for entry in a.datas
+    if keep_qt_plugin(entry) and keep_qt_module(entry)
+]
 
 pyz = PYZ(a.pure)
 

@@ -33,6 +33,7 @@ def _portable_runtime_patterns(system: str) -> tuple[str, ...]:
             "TrajPlayer/_internal/numpy/_core/_multiarray_umath*.pyd",
             "TrajPlayer/_internal/numpy.libs/*.dll",
             "TrajPlayer/**/_trajcore*.pyd",
+            "TrajPlayer/_internal/PySide6/plugins/platforms/qwindows.dll",
         )
     if system == "Linux":
         return (
@@ -41,6 +42,8 @@ def _portable_runtime_patterns(system: str) -> tuple[str, ...]:
             "TrajPlayer/_internal/numpy/_core/_multiarray_umath*.so",
             "TrajPlayer/_internal/numpy.libs/*.so*",
             "TrajPlayer/**/_trajcore*.so",
+            "TrajPlayer/_internal/PySide6/Qt/plugins/platforms/libqxcb.so",
+            "TrajPlayer/_internal/PySide6/Qt/plugins/xcbglintegrations/libqxcb-*-integration.so",
         )
     if system in {"Darwin", "macOS"}:
         return (

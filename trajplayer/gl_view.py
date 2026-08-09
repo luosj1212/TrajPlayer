@@ -38,6 +38,8 @@ GL_RENDERER = 0x1F01
 GL_VERSION = 0x1F02
 POSITION_BUFFER_COUNT = 3
 DEPTH_SORT_IDLE_MS = 80
+COARSE_DEPTH_SORT_ATOMS = 250_000
+COARSE_DEPTH_BINS = 256
 
 DEFAULT_BACKGROUND = (1.0, 1.0, 1.0, 1.0)
 BALL_STICK_ATOM_RADIUS_SCALE = 0.25
@@ -566,6 +568,24 @@ void main() {{
 """
 
 
+def coarse_depth_order(view_depth: np.ndarray) -> np.ndarray:
+    """Return a far-to-near O(N) radix order using 256 depth bins."""
+
+    depth = np.asarray(view_depth, dtype=np.float32)
+    if depth.ndim != 1:
+        raise ValueError("view_depth must be one-dimensional")
+    if depth.size <= 1:
+        return np.arange(depth.size, dtype=np.int64)
+    minimum = float(np.min(depth))
+    maximum = float(np.max(depth))
+    span = maximum - minimum
+    if not math.isfinite(span) or span <= np.finfo(np.float32).eps:
+        return np.arange(depth.size - 1, -1, -1, dtype=np.int64)
+    scaled = (depth - minimum) * ((COARSE_DEPTH_BINS - 1) / span)
+    bins = np.asarray(np.clip(scaled, 0, COARSE_DEPTH_BINS - 1), dtype=np.uint8)
+    return np.argsort(bins, kind="stable")[::-1]
+
+
 def default_surface_format() -> QSurfaceFormat:
     fmt = QSurfaceFormat()
     fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
@@ -674,6 +694,8 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._benchmark_finish_gpu = False
         self._render_stats: RenderStats | None = None
         self._last_upload_ms = 0.0
+        self._last_depth_sort_ms = 0.0
+        self._last_renderer_copy_bytes = 0
         self._frame_release: Callable[[], None] | None = None
         self._cleaning_up = False
         self._conservative_depth_enabled = False
@@ -1122,12 +1144,18 @@ class MoleculeGLWidget(QOpenGLWidget):
 
         draw_calls = 0
         self._last_upload_ms = 0.0
+        self._last_depth_sort_ms = 0.0
+        self._last_renderer_copy_bytes = 0
         if self._frame_upload_pending:
             self._upload_frame_buffers()
         if self._box_buffer_dirty:
             self._upload_box_buffer()
         if self._depth_order_dirty:
+            depth_sort_started_s = time.perf_counter()
             self._rebuild_render_atom_arrays()
+            self._last_depth_sort_ms = (
+                time.perf_counter() - depth_sort_started_s
+            ) * 1000.0
             self._upload_static_buffers()
         paint_start = time.perf_counter()
         self._set_physical_viewport()
@@ -1205,6 +1233,8 @@ class MoleculeGLWidget(QOpenGLWidget):
                 upload_ms=self._last_upload_ms,
                 draw_calls=draw_calls,
                 timestamp_s=paint_start,
+                depth_sort_ms=self._last_depth_sort_ms,
+                renderer_copy_bytes=self._last_renderer_copy_bytes,
             )
 
     def _set_periodic_uniforms(
@@ -1418,6 +1448,7 @@ class MoleculeGLWidget(QOpenGLWidget):
             buffer.write(0, ptr, int(array.nbytes))
         except (TypeError, ValueError):
             buffer.allocate(array.tobytes(), int(array.nbytes))
+            self._last_renderer_copy_bytes += int(array.nbytes)
 
     def _radii_for_render_mode(self, mode: str) -> np.ndarray:
         return self._vdw_radii
@@ -1449,7 +1480,10 @@ class MoleculeGLWidget(QOpenGLWidget):
                 dtype=np.float32,
             )
             view_depth = self._display_positions(indices) @ camera_forward
-            order = np.argsort(view_depth, kind="stable")[::-1]
+            if view_depth.size >= COARSE_DEPTH_SORT_ATOMS:
+                order = coarse_depth_order(view_depth)
+            else:
+                order = np.argsort(view_depth, kind="stable")[::-1]
             render_indices = indices[order]
         self._render_atom_indices = np.ascontiguousarray(render_indices, dtype=np.int32)
         self._visible_atom_indices_gpu = np.ascontiguousarray(render_indices, dtype=np.float32)
@@ -1460,7 +1494,6 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._visible_radii = np.ascontiguousarray(self._radii[render_indices], dtype=np.float32)
         self._visible_colors = np.ascontiguousarray(self._colors[render_indices], dtype=np.float32)
         self._depth_order_dirty = False
-
     def _rebuild_visible_bonds(self) -> None:
         if self._bond_pairs.size == 0 or self._atom_visible_mask.size == 0:
             visible_pairs = np.empty((0, 2), dtype=np.int32)

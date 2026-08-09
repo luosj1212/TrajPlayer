@@ -3,9 +3,11 @@ import unittest
 from pathlib import Path
 
 from scripts.report_bundle_size import (
+    bundle_group_deltas,
     bundle_size_report,
     check_bundle_growth,
     classify_bundle_member,
+    platform_baseline,
 )
 
 
@@ -37,6 +39,46 @@ class BundleSizeReportTests(unittest.TestCase):
             self.assertEqual(report["total_bytes"], 17)
             self.assertEqual(report["groups"]["Qt"], 10)
             self.assertEqual(report["groups"]["NumPy"], 7)
+            self.assertEqual(report["top_files"][0]["path"], "_internal/PySide6/Qt6Core.dll")
+            self.assertEqual(
+                report["top_dynamic_libraries"][0]["path"],
+                "_internal/PySide6/Qt6Core.dll",
+            )
+
+    def test_report_finds_duplicate_payload_without_following_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            first = root / "a.dll"
+            second = root / "nested" / "b.dll"
+            second.parent.mkdir()
+            first.write_bytes(b"same payload")
+            second.write_bytes(b"same payload")
+
+            report = bundle_size_report(root)
+
+            self.assertEqual(report["duplicate_bytes"], len(b"same payload"))
+            self.assertEqual(report["duplicates"][0]["copies"], 2)
+            self.assertEqual(report["duplicates"][0]["paths"], ["a.dll", "nested/b.dll"])
+
+    def test_report_flags_scipy_and_mdanalysis_package_trees(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            scipy_file = root / "_internal" / "scipy" / "sparse" / "core.pyc"
+            mda_file = root / "_internal" / "MDAnalysis" / "lib" / "util.pyc"
+            scipy_file.parent.mkdir(parents=True)
+            mda_file.parent.mkdir(parents=True)
+            scipy_file.touch()
+            mda_file.touch()
+
+            report = bundle_size_report(root)
+
+            self.assertEqual(
+                report["forbidden_dependencies"],
+                [
+                    "_internal/MDAnalysis/lib/util.pyc",
+                    "_internal/scipy/sparse/core.pyc",
+                ],
+            )
 
     def test_growth_check_rejects_more_than_five_percent(self) -> None:
         with self.assertRaises(RuntimeError):
@@ -53,6 +95,28 @@ class BundleSizeReportTests(unittest.TestCase):
             ),
             105,
         )
+
+    def test_structured_platform_baseline_and_group_deltas(self) -> None:
+        baseline_bytes, groups = platform_baseline(
+            {
+                "platforms": {
+                    "test": {
+                        "total_bytes": 100,
+                        "groups": {"Qt": 60, "Other": 40},
+                    }
+                }
+            },
+            "test",
+        )
+
+        self.assertEqual(baseline_bytes, 100)
+        self.assertEqual(groups["Qt"], 60)
+        deltas = bundle_group_deltas(
+            {"groups": {"Qt": 65, "Other": 37}},
+            groups,
+        )
+        self.assertEqual(deltas["Qt"], 5)
+        self.assertEqual(deltas["Other"], -3)
 
 
 if __name__ == "__main__":

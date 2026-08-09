@@ -19,6 +19,7 @@ WINDOWS_MEMBERS = (
     "TrajPlayer/_internal/numpy/_core/_multiarray_umath.cp310-win_amd64.pyd",
     "TrajPlayer/_internal/numpy.libs/openblas.dll",
     "TrajPlayer/_internal/trajplayer/_trajcore.cp310-win_amd64.pyd",
+    "TrajPlayer/_internal/PySide6/plugins/platforms/qwindows.dll",
 )
 MACOS_MEMBERS = (
     "TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer",

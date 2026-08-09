@@ -221,7 +221,7 @@ architecture.
 ```mermaid
 flowchart LR
     UI["Qt view + QAction commands"] --> P["Playback clock"]
-    P --> Q["One-frame present queue"]
+    P --> Q["Generation-safe present scheduler"]
     D["Direct trajectory reader"] --> S["Adaptive RAM frame cache"]
     D -. optional .-> C["Persistent/index cache"]
     S --> L["Frame lease"]
@@ -269,6 +269,9 @@ After building a portable package, inspect dependency-level bundle size with:
 ```bash
 python scripts/report_bundle_size.py
 ```
+
+See [docs/performance.md](docs/performance.md) for the benchmark JSON contract,
+regression comparison, and package-size validation commands.
 
 ## Requirements
 

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-import math
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
+
+PROCESS_STARTED_S = time.perf_counter()
 
 from trajplayer.startup import error_log_path, initialize_runtime, report_numpy_import_error
 
@@ -27,16 +28,13 @@ from PySide6.QtWidgets import (
 )
 
 from trajplayer.benchmark_stats import BenchmarkDiagnostics
-from trajplayer.benchmark_store import create_synthetic_store
-from trajplayer.binary_store import BinaryTrajectoryStore
 from trajplayer.cli_args import CliArgs, parse_cli_args
 from trajplayer.commands import WindowCommands
-from trajplayer.diagnostics import diagnostics_json, probe_opengl
 from trajplayer.gl_view import MoleculeGLWidget, default_surface_format
-from trajplayer.gui_smoke import GuiSmokeController
 from trajplayer.frame_store import FrameStore
 from trajplayer.playback import PlaybackEngine
-from trajplayer.present_queue import FramePresentQueue
+from trajplayer.present_scheduler import PresentScheduler
+from trajplayer.process_memory import ProcessMemorySnapshot, process_memory_snapshot
 from trajplayer.scrubbing import SliderScrubState
 from trajplayer.selection import (
     ChainSelectionError,
@@ -52,10 +50,10 @@ from trajplayer.trajectory_source import (
     paths_are_supported_for_drop,
     resolve_trajectory_source,
 )
-from trajplayer.workers import (
-    BondInferenceThread as WorkerBondInferenceThread,
-    TrajectoryOpenThread as WorkerTrajectoryOpenThread,
-)
+if TYPE_CHECKING:
+    from trajplayer.binary_store import BinaryTrajectoryStore
+    from trajplayer.gui_smoke import GuiSmokeController
+    from trajplayer.workers import BondInferenceThread, TrajectoryOpenThread
 
 class TrajPlayerApplication(QApplication):
     """Capture Finder file-open events before or after the main window exists."""
@@ -92,10 +90,6 @@ class TrajPlayerApplication(QApplication):
         return super().event(event)
 
 
-TrajectoryOpenThread = WorkerTrajectoryOpenThread
-BondInferenceThread = WorkerBondInferenceThread
-
-
 class TrajPlayerWindow(MainWindowView):
     stream_frame_ready = Signal(int)
     stream_failed = Signal(object, str)
@@ -105,6 +99,25 @@ class TrajPlayerWindow(MainWindowView):
     PREFETCH_RADIUS = 200
     SCRUB_PREVIEW_TIMER_MS = 4
     SCRUB_PREVIEW_FPS = 60.0
+
+    @property
+    def current_frame(self) -> int:
+        return self.present_scheduler.target_frame
+
+    @current_frame.setter
+    def current_frame(self, frame_index: int) -> None:
+        self.present_scheduler.set_target_frame(frame_index)
+
+    @property
+    def displayed_frame(self) -> int:
+        return self.present_scheduler.displayed_frame
+
+    @displayed_frame.setter
+    def displayed_frame(self, frame_index: int) -> None:
+        if int(frame_index) < 0:
+            self.present_scheduler.invalidate_display()
+        else:
+            self.present_scheduler.set_displayed_frame(frame_index)
 
     def __init__(self) -> None:
         super().__init__()
@@ -121,9 +134,7 @@ class TrajPlayerWindow(MainWindowView):
         self.bond_inference_pending = False
         self._retired_bond_threads: set[BondInferenceThread] = set()
         self.playback: PlaybackEngine | None = None
-        self.present_queue = FramePresentQueue()
-        self.current_frame = 0
-        self.displayed_frame = -1
+        self.present_scheduler = PresentScheduler()
         self.last_stream_seek_frame = 0
         self.trajectory_generation = 0
         self.reset_view_on_next_frame = False
@@ -144,8 +155,16 @@ class TrajPlayerWindow(MainWindowView):
         self.benchmark_diagnostics: BenchmarkDiagnostics | None = None
         self.benchmark_finish_gpu = False
         self.benchmark_warmup_started_s = 0.0
+        self.benchmark_memory_idle: ProcessMemorySnapshot | None = None
         self.automation_mode = False
         self.gui_smoke_controller: GuiSmokeController | None = None
+        self.startup_metrics: dict[str, float] = {
+            "process_to_qapplication_ms": 0.0,
+            "process_to_window_visible_ms": 0.0,
+            "process_to_first_gl_frame_ms": 0.0,
+        }
+        self._open_started_s: float | None = None
+        self._open_first_frame_ms = 0.0
 
         self.gl_view = MoleculeGLWidget()
         self.gl_view.frameSwapped.connect(self.on_frame_swapped)
@@ -191,6 +210,13 @@ class TrajPlayerWindow(MainWindowView):
         self.external_open_timer.setSingleShot(True)
         self.external_open_timer.setInterval(120)
         self.external_open_timer.timeout.connect(self.open_queued_external_paths)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if self.startup_metrics["process_to_window_visible_ms"] <= 0.0:
+            self.startup_metrics["process_to_window_visible_ms"] = (
+                time.perf_counter() - PROCESS_STARTED_S
+            ) * 1000.0
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
@@ -240,6 +266,8 @@ class TrajPlayerWindow(MainWindowView):
         if missing:
             self.show_error(f"File not found: {missing[0]}")
             return
+        self._open_started_s = time.perf_counter()
+        self._open_first_frame_ms = 0.0
         self.close_current_trajectory()
         if self._retired_open_stores:
             self._pending_open_source = source
@@ -251,6 +279,8 @@ class TrajPlayerWindow(MainWindowView):
         self._start_trajectory_open(source)
 
     def _start_trajectory_open(self, source: TrajectorySource) -> None:
+        from trajplayer.workers import TrajectoryOpenThread
+
         self.set_loading_state(source)
         thread = TrajectoryOpenThread(source)
         thread.progress.connect(
@@ -428,7 +458,7 @@ class TrajPlayerWindow(MainWindowView):
         source: TrajectorySource,
         store: FrameStore,
     ) -> None:
-        self.present_queue.clear()
+        self.present_scheduler.begin_generation(target_frame=0)
         self.store = store
 
         def report_stream_error(error: BaseException) -> None:
@@ -445,8 +475,6 @@ class TrajPlayerWindow(MainWindowView):
         )
         self.streamer = streamer
         streamer.start()
-        self.current_frame = 0
-        self.displayed_frame = -1
         self.last_stream_seek_frame = 0
         self.reset_view_on_next_frame = True
         self.component_ids = np.empty((0,), dtype=np.int32)
@@ -765,6 +793,8 @@ class TrajPlayerWindow(MainWindowView):
         self.try_start_bond_inference()
 
     def try_start_bond_inference(self) -> None:
+        from trajplayer.workers import BondInferenceThread
+
         if (
             not self.bond_inference_pending
             or self.bond_thread is not None
@@ -858,6 +888,8 @@ class TrajPlayerWindow(MainWindowView):
         base_metrics: dict[str, object],
     ) -> None:
         self.benchmark_output = output_path
+        self._open_started_s = time.perf_counter()
+        self._open_first_frame_ms = 0.0
         self.benchmark_target_frames = max(1, int(render_frames))
         self.benchmark_base_metrics = dict(base_metrics)
         self.benchmark_finish_gpu = bool(finish_gpu)
@@ -893,6 +925,7 @@ class TrajPlayerWindow(MainWindowView):
             self.finish_benchmark(timed_out=True)
             return
         self.benchmark_diagnostics = BenchmarkDiagnostics()
+        self.benchmark_memory_idle = process_memory_snapshot()
         self.gl_view.enable_benchmark_stats(finish_gpu=self.benchmark_finish_gpu)
         self.benchmark_started_s = time.perf_counter()
         self.playback = PlaybackEngine(
@@ -926,21 +959,16 @@ class TrajPlayerWindow(MainWindowView):
         streamer_stats = (
             self.streamer.stats_snapshot() if self.streamer is not None else None
         )
+        memory_idle = self.benchmark_memory_idle or process_memory_snapshot()
+        memory_playback = process_memory_snapshot()
         elapsed_s = max(0.0, time.perf_counter() - self.benchmark_started_s)
-        frames = int(render_summary.get("frames", 0))
-        result = {
-            **self.benchmark_base_metrics,
-            "timed_out": timed_out,
-            "benchmark_elapsed_s": elapsed_s,
-            "measured_fps": render_summary.get("cadence_fps", 0.0),
-            "render": render_summary,
-            "pipeline": self.benchmark_diagnostics.summary()
+        pipeline_summary = (
+            self.benchmark_diagnostics.summary()
             if self.benchmark_diagnostics is not None
-            else {},
-            "streamer_memory_bytes": self.streamer.memory_bytes if self.streamer is not None else 0,
-            "streamer_budget_bytes": self.streamer.max_memory_bytes if self.streamer is not None else 0,
-            "streamer_budget_mode": self.streamer.memory_budget.mode if self.streamer is not None else "none",
-            "streamer_io": {}
+            else {}
+        )
+        streamer_io = (
+            {}
             if streamer_stats is None
             else {
                 "loads": streamer_stats.loads,
@@ -948,10 +976,67 @@ class TrajPlayerWindow(MainWindowView):
                 "cache_misses": streamer_stats.cache_misses,
                 "cache_hit_rate": streamer_stats.cache_hit_rate,
                 "load_latency_ms": streamer_stats.load_latency_ms,
+                "frame_read_ms_p50": streamer_stats.read_latency_ms_p50,
+                "frame_read_ms_p95": streamer_stats.read_latency_ms_p95,
+                "frame_read_ms_p99": streamer_stats.read_latency_ms_p99,
                 "decoded_megabytes": streamer_stats.decoded_megabytes,
+                "decode_mb_s": streamer_stats.decode_megabytes_per_second,
                 "decode_megabytes_per_second": streamer_stats.decode_megabytes_per_second,
                 "effective_prefetch_frames": streamer_stats.effective_prefetch_frames,
+                "lease_acquisitions": streamer_stats.lease_acquisitions,
+                "lease_releases": streamer_stats.lease_releases,
+                "active_leases": streamer_stats.active_leases,
+                "peak_active_leases": streamer_stats.peak_active_leases,
+                "stale_lease_releases": streamer_stats.stale_lease_releases,
+                "allocated_capacity": streamer_stats.allocated_capacity,
+                "max_capacity": streamer_stats.max_capacity,
+                "slab_count": streamer_stats.slab_count,
+                "allocated_cache_bytes": streamer_stats.allocated_cache_bytes,
+                "memory_target_bytes": streamer_stats.memory_target_bytes,
+                "memory_target_reason": streamer_stats.memory_target_reason,
+            }
+        )
+        frame_cache_bytes = self.streamer.memory_bytes if self.streamer is not None else 0
+        result = {
+            **self.benchmark_base_metrics,
+            "timed_out": timed_out,
+            "benchmark_elapsed_s": elapsed_s,
+            "measured_fps": render_summary.get("cadence_fps", 0.0),
+            "startup": dict(self.startup_metrics),
+            "open": {
+                "metadata_ms": float(
+                    self.benchmark_base_metrics.get("cache_open_s", 0.0)
+                )
+                * 1000.0,
+                "first_frame_ms": self._open_first_frame_ms,
+                "index_complete_ms": float(
+                    self.benchmark_base_metrics.get("index_complete_ms", 0.0)
+                ),
             },
+            "render": render_summary,
+            "pipeline": pipeline_summary,
+            "io": streamer_io,
+            "memory": {
+                "rss_idle_mib": memory_idle.rss_mib,
+                "rss_playback_mib": memory_playback.rss_mib,
+                "rss_peak_mib": max(
+                    memory_idle.peak_rss_mib,
+                    memory_playback.peak_rss_mib,
+                ),
+                "frame_cache_mib": frame_cache_bytes / (1024.0 * 1024.0),
+            },
+            "copies": {
+                "renderer_full_frame_copy_bytes": int(
+                    render_summary.get("renderer_full_frame_copy_bytes", 0)
+                ),
+                "renderer_full_frame_copy_bytes_per_frame": float(
+                    render_summary.get("renderer_full_frame_copy_bytes_per_frame", 0.0)
+                ),
+            },
+            "streamer_memory_bytes": frame_cache_bytes,
+            "streamer_budget_bytes": self.streamer.max_memory_bytes if self.streamer is not None else 0,
+            "streamer_budget_mode": self.streamer.memory_budget.mode if self.streamer is not None else "none",
+            "streamer_io": streamer_io,
             "conservative_depth": self.gl_view.conservative_depth_enabled,
             "opengl": self.gl_view.gl_diagnostics,
         }
@@ -985,7 +1070,7 @@ class TrajPlayerWindow(MainWindowView):
         self.open_thread = None
 
         self.stop_playback()
-        self.present_queue.clear()
+        self.present_scheduler.begin_generation(target_frame=0)
         self.gl_view.release_frame_reference()
         self.cache_build_in_progress = False
         self.stop_bond_inference(wait_ms=0)
@@ -1060,7 +1145,7 @@ class TrajPlayerWindow(MainWindowView):
     def on_render_tick(self) -> None:
         if self.store is None or self.streamer is None:
             return
-        if self.present_queue.has_pending_frame:
+        if self.present_scheduler.has_pending_frame:
             return
 
         tick_time = time.perf_counter()
@@ -1094,8 +1179,6 @@ class TrajPlayerWindow(MainWindowView):
             self.request_stream_frame(self.current_frame)
 
         if self.displayed_frame == self.current_frame:
-            if self.benchmark_diagnostics is not None:
-                self.benchmark_diagnostics.record_duplicate_frame()
             self.schedule_next_render_tick()
             return
         lease = self.streamer.acquire_frame(self.current_frame)
@@ -1106,7 +1189,8 @@ class TrajPlayerWindow(MainWindowView):
             return
 
         frame_index = self.current_frame
-        if not self.present_queue.begin(frame_index):
+        present_token = self.present_scheduler.submit(frame_index, now_s=tick_time)
+        if present_token is None:
             lease.release()
             return
         try:
@@ -1117,7 +1201,7 @@ class TrajPlayerWindow(MainWindowView):
                 release_callback=lease.release,
             )
         except Exception:
-            self.present_queue.clear()
+            self.present_scheduler.clear_pending()
             lease.release()
             raise
         if self.benchmark_diagnostics is not None:
@@ -1126,10 +1210,27 @@ class TrajPlayerWindow(MainWindowView):
         self.schedule_next_render_tick()
 
     def on_frame_swapped(self) -> None:
-        frame_index = self.present_queue.acknowledge()
-        if frame_index is None:
+        now_s = time.perf_counter()
+        if self.startup_metrics["process_to_first_gl_frame_ms"] <= 0.0:
+            self.startup_metrics["process_to_first_gl_frame_ms"] = (
+                now_s - PROCESS_STARTED_S
+            ) * 1000.0
+        acknowledgement = self.present_scheduler.acknowledge_swap(
+            now_s=now_s
+        )
+        if acknowledgement is None or not acknowledgement.accepted:
             return
-        self.displayed_frame = frame_index
+        frame_index = acknowledgement.token.frame_index
+        if self.benchmark_diagnostics is not None:
+            self.benchmark_diagnostics.record_present_latency(
+                acknowledgement.latency_ms
+            )
+        if self._open_started_s is not None and self._open_first_frame_ms <= 0.0:
+            self._open_first_frame_ms = max(
+                0.0,
+                (now_s - self._open_started_s) * 1000.0,
+            )
+            self._open_started_s = None
         self.update_frame_label()
         if self.current_frame != self.displayed_frame:
             self.render_timer.start(0)
@@ -1172,10 +1273,13 @@ class TrajPlayerWindow(MainWindowView):
         if (
             self.streamer.capacity == 1
             and not self.streamer.has_frame(target)
-            and not self.present_queue.has_pending_frame
+            and not self.present_scheduler.has_pending_frame
         ):
             self.gl_view.release_frame_reference()
-        if self.streamer.has_frame(target) and not self.present_queue.has_pending_frame:
+        if (
+            self.streamer.has_frame(target)
+            and not self.present_scheduler.has_pending_frame
+        ):
             self.render_timer.start(0)
     def toggle_playback(self) -> None:
         if self.store is None:
@@ -1204,23 +1308,18 @@ class TrajPlayerWindow(MainWindowView):
             self.render_timer.stop()
 
     def schedule_next_render_tick(self) -> None:
-        if self.present_queue.has_pending_frame:
+        frame_available = (
+            self.streamer is not None and self.streamer.has_frame(self.current_frame)
+        )
+        delay_ms = self.present_scheduler.next_timer_delay_ms(
+            playback=self.playback,
+            frame_available=frame_available,
+            now_s=time.perf_counter(),
+        )
+        if delay_ms is None:
             self.render_timer.stop()
             return
-        if self.displayed_frame != self.current_frame:
-            if self.streamer is not None and self.streamer.has_frame(self.current_frame):
-                self.render_timer.start(0)
-            else:
-                self.render_timer.stop()
-            return
-        if self.playback is None or not self.playback.running:
-            self.render_timer.stop()
-            return
-        delay_s = self.playback.next_frame_delay_s(time.perf_counter())
-        if delay_s is None:
-            self.render_timer.stop()
-            return
-        self.render_timer.start(max(1, int(math.ceil(delay_s * 1000.0))))
+        self.render_timer.start(delay_ms)
 
     def on_playback_speed_changed(self, value: int) -> None:
         self.playback_speed_value_label.setText(f"{int(value)} FPS")
@@ -1443,6 +1542,8 @@ def main() -> None:
             raise SystemExit(2) from exc
         return
     if cli_args.doctor_output is not None:
+        from trajplayer.diagnostics import diagnostics_json, probe_opengl
+
         report = diagnostics_json(
             opengl=probe_opengl(),
             log_path=error_log_path(),
@@ -1466,13 +1567,19 @@ def main() -> None:
 
     QSurfaceFormat.setDefaultFormat(default_surface_format())
     app = TrajPlayerApplication(sys.argv)
+    qapplication_created_s = time.perf_counter()
     window = TrajPlayerWindow()
+    window.startup_metrics["process_to_qapplication_ms"] = (
+        qapplication_created_s - PROCESS_STARTED_S
+    ) * 1000.0
     window.show()
     app.set_file_open_handler(
         window.queue_external_open_path,
         replay_pending=not bool(cli_args.paths),
     )
     if cli_args.gui_smoke:
+        from trajplayer.gui_smoke import GuiSmokeController
+
         window.gui_smoke_controller = GuiSmokeController(
             window,
             timeout_ms=cli_args.gui_smoke_timeout_ms,
@@ -1500,6 +1607,9 @@ def main() -> None:
 
 
 def prepare_benchmark_store(args: CliArgs) -> tuple[BinaryTrajectoryStore, Path, dict[str, object]]:
+    from trajplayer.benchmark_store import create_synthetic_store
+    from trajplayer.binary_store import BinaryTrajectoryStore
+
     assert args.benchmark_output is not None
     root = args.benchmark_root or args.benchmark_output.with_suffix(".tpdata")
     root = root.resolve()
@@ -1535,6 +1645,8 @@ def prepare_benchmark_store(args: CliArgs) -> tuple[BinaryTrajectoryStore, Path,
 
 
 def benchmark_store_matches(root: Path, frame_count: int, atom_count: int) -> bool:
+    from trajplayer.binary_store import BinaryTrajectoryStore
+
     try:
         with BinaryTrajectoryStore.open(root, mode="r") as store:
             return (

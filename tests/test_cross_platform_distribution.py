@@ -19,6 +19,13 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         self.assertIn("extra_binaries.append((str(native_module), 'trajplayer'))", source)
         self.assertIn("'matplotlib'", source)
         self.assertIn("'IPython'", source)
+        self.assertIn("QT_PLUGIN_ALLOWLIST", source)
+        self.assertIn("('platforms', 'qwindows.dll')", source)
+        self.assertIn("('platforms', 'libqxcb.so')", source)
+        self.assertIn("('platforms', 'libqcocoa.dylib')", source)
+        self.assertIn("UNUSED_QT_MODULE_PREFIXES", source)
+        self.assertIn("'PySide6.QtQuick'", source)
+        self.assertIn("keep_qt_plugin(entry) and keep_qt_module(entry)", source)
 
     def test_linux_build_script_creates_an_onedir_archive(self) -> None:
         source = Path("build_linux.sh").read_text(encoding="utf-8")
@@ -76,6 +83,11 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         self.assertIn("macOS-x86_64", release)
         self.assertIn("Smoke-test macOS app bundle", release)
         self.assertIn("codesign --verify --deep --strict", release)
+        windows_benchmark = release.split(
+            "- name: Benchmark Windows portable runtime", 1
+        )[1].split("- name: Smoke-test Linux portable runtime", 1)[0]
+        self.assertIn('$env:QT_OPENGL = "software"', windows_benchmark)
+        self.assertNotIn("-WindowStyle Hidden", windows_benchmark)
 
     def test_native_extension_is_required_for_builds(self) -> None:
         setup_source = Path("setup.py").read_text(encoding="utf-8")
