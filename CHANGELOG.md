@@ -5,6 +5,8 @@ All notable changes to TrajPlayer are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.0-alpha.7] - 2026-08-09
+
 ### Changed
 
 - Replaced the window-owned present queue state with a generation-safe
@@ -129,6 +131,7 @@ All notable changes to TrajPlayer are documented here. The project follows
 - Windows x64 and Linux x86_64 portable packaging
 - Cross-platform tests, CI, release automation, and dependency license collection
 
+[0.1.0-alpha.7]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.4

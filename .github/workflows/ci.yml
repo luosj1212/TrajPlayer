@@ -108,8 +108,11 @@ jobs:
         with:
           name: Windows-portable-smoke
           path: |
+            TrajPlayer-Windows-x64-*.zip
+            TrajPlayer-Windows-x64-*.zip.sha256
             bundle-size-Windows-x64.json
             portable-reader-smoke.json
+          retention-days: 3
 
       - name: Exercise a real GUI and software OpenGL trajectory on Linux
         if: runner.os == 'Linux'

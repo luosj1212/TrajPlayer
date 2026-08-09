@@ -63,7 +63,7 @@ are different from the source archive offered by **Code > Download ZIP**.
 ### Windows Portable Package
 
 1. Open GitHub Releases and download
-   `TrajPlayer-Windows-x64-v0.1.0-alpha.6.zip`, not the source-code ZIP.
+   `TrajPlayer-Windows-x64-v0.1.0-alpha.7.zip`, not the source-code ZIP.
 2. Extract the archive completely.
 3. Run `TrajPlayer\TrajPlayer.exe` from the extracted directory.
 4. Use **Open** or drag trajectory files into the application window.
@@ -88,7 +88,7 @@ extracted `TrajPlayer` folder and run:
 
 ### Linux Portable Package
 
-Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.6.tar.gz` from GitHub Releases
+Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.7.tar.gz` from GitHub Releases
 and extract the complete archive. Python is not required. Then run:
 
 ```bash
@@ -106,8 +106,8 @@ Generate the same report with
 Download the ZIP that matches the Mac:
 
 - Apple Silicon (M1 or newer):
-  `TrajPlayer-macOS-arm64-v0.1.0-alpha.6.zip`
-- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.6.zip`
+  `TrajPlayer-macOS-arm64-v0.1.0-alpha.7.zip`
+- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.7.zip`
 
 Extract the complete ZIP, then open `TrajPlayer-macOS/TrajPlayer.app`. Python
 and Conda are not required. The app can be moved to `/Applications` as a whole;
