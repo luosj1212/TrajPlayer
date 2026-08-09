@@ -14,6 +14,7 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         source = Path("TrajPlayer.spec").read_text(encoding="utf-8")
         self.assertNotIn("collect_dynamic_libs('PySide6')", source)
         self.assertIn("'PySide6.QtOpenGLWidgets'", source)
+        self.assertIn("'trajplayer._trajcore'", source)
         self.assertIn("'matplotlib'", source)
         self.assertIn("'IPython'", source)
 
@@ -59,6 +60,7 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         self.assertIn("--gui-smoke", release)
         self.assertIn("--reader-smoke", ci)
         self.assertIn("--reader-smoke", release)
+        self.assertIn("--native-smoke", release)
         self.assertIn("xvfb-run", release)
         self.assertIn("libgl1-mesa-dri", release)
         self.assertIn("macos-15", ci)
@@ -67,6 +69,11 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         self.assertIn("macOS-x86_64", release)
         self.assertIn("Smoke-test macOS app bundle", release)
         self.assertIn("codesign --verify --deep --strict", release)
+
+    def test_native_extension_is_required_for_builds(self) -> None:
+        setup_source = Path("setup.py").read_text(encoding="utf-8")
+        self.assertIn('"trajplayer._trajcore"', setup_source)
+        self.assertNotIn("optional=True", setup_source)
 
 
 if __name__ == "__main__":

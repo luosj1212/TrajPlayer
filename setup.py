@@ -11,7 +11,6 @@ setup(
             "trajplayer._trajcore",
             sources=["trajplayer/_trajcore.c"],
             include_dirs=[numpy.get_include()],
-            optional=True,
         )
     ]
 )

@@ -92,6 +92,11 @@ jobs:
             Get-Content "dist/TrajPlayer/traj_player_error.log" -ErrorAction SilentlyContinue
             throw "Portable TrajPlayer exited with code $($process.ExitCode)."
           }
+          & "dist/TrajPlayer/TrajPlayer.exe" --native-smoke
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content "dist/TrajPlayer/traj_player_error.log" -ErrorAction SilentlyContinue
+            throw "Portable TrajPlayer native extension smoke test failed."
+          }
           & "dist/TrajPlayer/TrajPlayer.exe" `
             --reader-smoke=smoke-fixtures `
             --reader-smoke-output=reader-smoke.json
@@ -106,6 +111,7 @@ jobs:
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
+          ./dist/TrajPlayer/TrajPlayer --native-smoke
           ./dist/TrajPlayer/TrajPlayer --reader-smoke=smoke-fixtures --reader-smoke-output=reader-smoke.json
           cat reader-smoke.json
           xvfb-run -a ./dist/TrajPlayer/TrajPlayer --gui-smoke --gui-smoke-timeout-ms=20000 --gui-smoke-output=gui-smoke.json examples/c60.extxyz
@@ -116,6 +122,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: cocoa
         run: |
+          ./dist/TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer --native-smoke
           ./dist/TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer --reader-smoke=smoke-fixtures --reader-smoke-output=reader-smoke.json
           cat reader-smoke.json
           ./dist/TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer --gui-smoke --gui-smoke-timeout-ms=20000 --gui-smoke-output=gui-smoke.json examples/c60.extxyz

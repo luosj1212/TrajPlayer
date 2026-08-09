@@ -43,6 +43,7 @@ a = Analysis(
     hiddenimports=[
         'numpy._core._multiarray_umath',
         'numpy._core._multiarray_tests',
+        'trajplayer._trajcore',
         'ase.data',
         'ase.data.colors',
         'chemfiles',

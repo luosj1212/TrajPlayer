@@ -8,6 +8,7 @@ from pathlib import Path
 class CliArgs:
     paths: list[Path]
     startup_smoke: bool = False
+    native_smoke: bool = False
     smoke_exit_ms: int | None = None
     gui_smoke: bool = False
     gui_smoke_output: Path | None = None
@@ -28,6 +29,7 @@ class CliArgs:
 def parse_cli_args(argv: list[str]) -> CliArgs:
     paths: list[Path] = []
     startup_smoke = False
+    native_smoke = False
     smoke_exit_ms: int | None = None
     gui_smoke = False
     gui_smoke_output: Path | None = None
@@ -47,6 +49,8 @@ def parse_cli_args(argv: list[str]) -> CliArgs:
     for arg in argv:
         if arg == "--startup-smoke":
             startup_smoke = True
+        elif arg == "--native-smoke":
+            native_smoke = True
         elif arg == "--gui-smoke":
             gui_smoke = True
         elif arg.startswith("--gui-smoke-output="):
@@ -83,6 +87,7 @@ def parse_cli_args(argv: list[str]) -> CliArgs:
     return CliArgs(
         paths=paths,
         startup_smoke=startup_smoke,
+        native_smoke=native_smoke,
         smoke_exit_ms=smoke_exit_ms,
         gui_smoke=gui_smoke,
         gui_smoke_output=gui_smoke_output,

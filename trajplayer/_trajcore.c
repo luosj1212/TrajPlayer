@@ -436,6 +436,7 @@ static PyObject *trajcore_candidate_pairs(PyObject *self, PyObject *args) {
     double origin[3] = {0.0, 0.0, 0.0};
     int64_t bin_count[3] = {1, 1, 1};
     int invalid_input = 0;
+    CandidateBuffer candidates = {0};
 
     Py_BEGIN_ALLOW_THREADS
     if (!periodic) {
@@ -540,7 +541,6 @@ static PyObject *trajcore_candidate_pairs(PyObject *self, PyObject *args) {
         }
     }
 
-    CandidateBuffer candidates = {0};
     double cutoff2 = cutoff * cutoff;
     if (!invalid_input) {
         for (npy_intp group_index = 0; group_index < group_count && !candidates.failed; ++group_index) {
@@ -679,4 +679,3 @@ PyMODINIT_FUNC PyInit__trajcore(void) {
     import_array();
     return PyModule_Create(&trajcore_module);
 }
-

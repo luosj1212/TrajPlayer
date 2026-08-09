@@ -9,6 +9,7 @@ class CliArgsTests(unittest.TestCase):
         args = parse_cli_args(
             [
                 "--startup-smoke",
+                "--native-smoke",
                 "--gui-smoke",
                 "--gui-smoke-output=C:/tmp/gui-smoke.json",
                 "--gui-smoke-timeout-ms=20000",
@@ -29,6 +30,7 @@ class CliArgsTests(unittest.TestCase):
         )
 
         self.assertTrue(args.startup_smoke)
+        self.assertTrue(args.native_smoke)
         self.assertTrue(args.gui_smoke)
         self.assertEqual(args.gui_smoke_output, Path("C:/tmp/gui-smoke.json"))
         self.assertEqual(args.gui_smoke_timeout_ms, 20000)

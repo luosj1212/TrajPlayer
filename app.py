@@ -1418,6 +1418,14 @@ def main() -> None:
     cli_args = parse_cli_args(sys.argv[1:])
     if cli_args.startup_smoke:
         return
+    if cli_args.native_smoke:
+        from trajplayer.trajcore import NATIVE_AVAILABLE
+
+        if not NATIVE_AVAILABLE:
+            print("[native-smoke] trajplayer._trajcore is unavailable", flush=True)
+            raise SystemExit(2)
+        print("[native-smoke] trajplayer._trajcore is available", flush=True)
+        return
     if cli_args.reader_smoke is not None:
         from trajplayer.reader_smoke import run_reader_smoke, write_reader_smoke_report
 
