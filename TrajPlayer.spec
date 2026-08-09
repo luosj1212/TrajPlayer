@@ -61,9 +61,9 @@ def keep_qt_module(entry):
     basename = str(entry[0]).replace('\\', '/').lower().rsplit('/', 1)[-1]
     return not any(
         basename == f'qt{module}'
-        or basename.startswith(f'qt{module}.')
-        or basename.startswith(f'qt6{module}.')
-        or basename.startswith(f'libqt6{module}.')
+        or basename.startswith(f'qt{module}')
+        or basename.startswith(f'qt6{module}')
+        or basename.startswith(f'libqt6{module}')
         for module in UNUSED_QT_MODULE_PREFIXES
     )
 

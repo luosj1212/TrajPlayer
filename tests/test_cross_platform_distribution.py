@@ -25,6 +25,7 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         self.assertIn("('platforms', 'libqcocoa.dylib')", source)
         self.assertIn("UNUSED_QT_MODULE_PREFIXES", source)
         self.assertIn("'PySide6.QtQuick'", source)
+        self.assertIn("basename.startswith(f'qt6{module}')", source)
         self.assertIn("keep_qt_plugin(entry) and keep_qt_module(entry)", source)
 
     def test_linux_build_script_creates_an_onedir_archive(self) -> None:
