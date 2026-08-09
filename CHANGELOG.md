@@ -27,6 +27,9 @@ All notable changes to TrajPlayer are documented here. The project follows
   Qt module/plugin allowlists, and a two-percent unexplained package growth gate
 - Deferred nonessential backend, diagnostics, worker, and benchmark imports to
   improve cold startup without changing the visible UI
+- Made OpenGL teardown and not-yet-ready position buffers safe during pending
+  paint events, and stopped release CI from forcing an OpenGL 3.0 Windows
+  software renderer against TrajPlayer's documented OpenGL 3.3 requirement
 
 ## [0.1.0-alpha.6] - 2026-08-09
 

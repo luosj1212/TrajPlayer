@@ -84,11 +84,10 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         self.assertIn("macOS-x86_64", release)
         self.assertIn("Smoke-test macOS app bundle", release)
         self.assertIn("codesign --verify --deep --strict", release)
-        windows_benchmark = release.split(
-            "- name: Benchmark Windows portable runtime", 1
-        )[1].split("- name: Smoke-test Linux portable runtime", 1)[0]
-        self.assertIn('$env:QT_OPENGL = "software"', windows_benchmark)
-        self.assertNotIn("-WindowStyle Hidden", windows_benchmark)
+        self.assertNotIn("Benchmark Windows portable runtime", release)
+        self.assertNotIn('$env:QT_OPENGL = "software"', release)
+        self.assertIn("Benchmark Linux portable runtime", release)
+        self.assertIn("Benchmark macOS app bundle", release)
 
     def test_native_extension_is_required_for_builds(self) -> None:
         setup_source = Path("setup.py").read_text(encoding="utf-8")

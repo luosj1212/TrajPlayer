@@ -1106,36 +1106,47 @@ class MoleculeGLWidget(QOpenGLWidget):
     def cleanup(self) -> None:
         self._depth_sort_timer.stop()
         self.release_frame_reference()
-        if self._cleaning_up or not self.isValid():
+        if self._cleaning_up:
+            return
+        if not self.isValid():
+            self._position_texture = None
+            self._positions_uploaded = False
+            self._gl = None
             return
         self._cleaning_up = True
         try:
             self.makeCurrent()
-            for texture in self._position_textures:
-                if texture.isCreated():
-                    texture.destroy()
-            self._position_textures = []
-            self._position_texture = None
-            for buffer in (
-                self._quad_vbo,
-                self._atom_index_vbo,
-                self._radius_vbo,
-                self._color_vbo,
-                self._atom_unwrap_anchor_vbo,
-                self._bond_data_vbo,
-                self._bond_color_vbo,
-                self._box_vbo,
-            ):
-                if buffer.isCreated():
-                    buffer.destroy()
-            for buffer in self._position_vbos:
-                if buffer.isCreated():
-                    buffer.destroy()
-            for vao in (self._vao, self._bond_vao, self._box_vao):
-                if vao.isCreated():
-                    vao.destroy()
-            self.doneCurrent()
+            try:
+                for texture in self._position_textures:
+                    if texture.isCreated():
+                        texture.destroy()
+                self._position_textures = []
+                self._position_texture = None
+                for buffer in (
+                    self._quad_vbo,
+                    self._atom_index_vbo,
+                    self._radius_vbo,
+                    self._color_vbo,
+                    self._atom_unwrap_anchor_vbo,
+                    self._bond_data_vbo,
+                    self._bond_color_vbo,
+                    self._box_vbo,
+                ):
+                    if buffer.isCreated():
+                        buffer.destroy()
+                for buffer in self._position_vbos:
+                    if buffer.isCreated():
+                        buffer.destroy()
+                for vao in (self._vao, self._bond_vao, self._box_vao):
+                    if vao.isCreated():
+                        vao.destroy()
+            finally:
+                self.doneCurrent()
         finally:
+            self._position_buffer_index = -1
+            self._positions_uploaded = False
+            self._frame_upload_pending = True
+            self._gl = None
             self._cleaning_up = False
 
     def paintGL(self) -> None:  # type: ignore[override]
@@ -1157,6 +1168,9 @@ class MoleculeGLWidget(QOpenGLWidget):
                 time.perf_counter() - depth_sort_started_s
             ) * 1000.0
             self._upload_static_buffers()
+        position_texture = (
+            self._position_texture if self._positions_uploaded else None
+        )
         paint_start = time.perf_counter()
         self._set_physical_viewport()
         self._gl.glClearColor(*self._background)
@@ -1175,7 +1189,11 @@ class MoleculeGLWidget(QOpenGLWidget):
             self._box_vao.release()
             self._box_program.release()
 
-        if self._show_atoms and self._visible_atom_count > 0:
+        if (
+            self._show_atoms
+            and self._visible_atom_count > 0
+            and position_texture is not None
+        ):
             self._program.bind()
             self._program.setUniformValue(self._loc_view, view)
             self._program.setUniformValue(self._loc_proj, proj)
@@ -1188,7 +1206,7 @@ class MoleculeGLWidget(QOpenGLWidget):
                 inverse_locations=self._loc_inverse_columns,
             )
             self._gl.glActiveTexture(GL_TEXTURE0)
-            self._gl.glBindTexture(GL_TEXTURE_BUFFER, self._position_texture.textureId())
+            self._gl.glBindTexture(GL_TEXTURE_BUFFER, position_texture.textureId())
             self._vao.bind()
             self._gl.glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, self._visible_atom_count)
             draw_calls += 1
@@ -1196,7 +1214,12 @@ class MoleculeGLWidget(QOpenGLWidget):
             self._gl.glBindTexture(GL_TEXTURE_BUFFER, 0)
             self._program.release()
 
-        if self._show_bonds and self._bond_instance_count > 0 and self._bond_program is not None:
+        if (
+            self._show_bonds
+            and self._bond_instance_count > 0
+            and self._bond_program is not None
+            and position_texture is not None
+        ):
             self._bond_program.bind()
             self._bond_program.setUniformValue(self._bond_loc_view, view)
             self._bond_program.setUniformValue(self._bond_loc_proj, proj)
@@ -1218,7 +1241,7 @@ class MoleculeGLWidget(QOpenGLWidget):
                 inverse_locations=self._bond_loc_inverse_columns,
             )
             self._gl.glActiveTexture(GL_TEXTURE0)
-            self._gl.glBindTexture(GL_TEXTURE_BUFFER, self._position_texture.textureId())
+            self._gl.glBindTexture(GL_TEXTURE_BUFFER, position_texture.textureId())
             self._bond_vao.bind()
             self._gl.glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, self._bond_instance_count)
             draw_calls += 1

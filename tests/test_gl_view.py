@@ -58,6 +58,13 @@ class GlViewDefaultsTests(unittest.TestCase):
         self.assertIn("cleanup", gl_view.MoleculeGLWidget.initializeGL.__code__.co_names)
         self.assertIn("destroy", gl_view.MoleculeGLWidget.cleanup.__code__.co_names)
         self.assertIn("makeCurrent", gl_view.MoleculeGLWidget.cleanup.__code__.co_names)
+        self.assertIn("_gl", gl_view.MoleculeGLWidget.cleanup.__code__.co_names)
+
+    def test_paint_skips_atom_resources_until_the_position_texture_is_ready(self) -> None:
+        paint_names = gl_view.MoleculeGLWidget.paintGL.__code__.co_names
+
+        self.assertIn("_position_texture", paint_names)
+        self.assertIn("_positions_uploaded", paint_names)
 
     def test_default_camera_fit_keeps_molecule_large_enough_to_read(self) -> None:
         self.assertGreaterEqual(gl_view.CAMERA_DISTANCE_SCALE, 2.55)

@@ -123,32 +123,6 @@ jobs:
           }
           Get-Content reader-smoke.json
 
-      - name: Benchmark Windows portable runtime
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $env:QT_OPENGL = "software"
-          $benchmark = Start-Process `
-            -FilePath "dist/TrajPlayer/TrajPlayer.exe" `
-            -ArgumentList @(
-              "--benchmark-output=performance-${{ matrix.label }}.json",
-              "--benchmark-atoms=100000",
-              "--benchmark-frames=64",
-              "--benchmark-render-frames=120",
-              "--benchmark-bonds",
-              "--benchmark-finish-gpu"
-            ) `
-            -PassThru
-          if (-not $benchmark.WaitForExit(180000)) {
-            Stop-Process -Id $benchmark.Id -Force
-            throw "Portable benchmark timed out."
-          }
-          if ($benchmark.ExitCode -ne 0) {
-            Get-Content "dist/TrajPlayer/traj_player_error.log" -ErrorAction SilentlyContinue
-            throw "Portable benchmark failed with code $($benchmark.ExitCode)."
-          }
-          python scripts/check_perf_report.py "performance-${{ matrix.label }}.json"
-
       - name: Smoke-test Linux portable runtime
         if: runner.os == 'Linux'
         env:

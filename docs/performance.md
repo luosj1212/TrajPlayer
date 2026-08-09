@@ -73,6 +73,8 @@ SHA-256 duplicate sets, and baseline deltas.
 
 Pull-request CI runs the full test suite and reader smoke corpus on Windows,
 Linux, and macOS. Linux additionally records a synthetic performance artifact;
-Windows builds and checks the complete portable folder. Tagged releases run
-the 100,000 atom benchmark on all four portable targets and retain each JSON
-report with the package artifact.
+Windows builds and checks the complete portable folder. GitHub's hosted Windows
+desktop does not expose the required OpenGL 3.3 context, so tagged releases run
+the 100,000 atom benchmark on Linux and both macOS targets and retain each JSON
+report with the package artifact. Windows GPU results should be recorded on a
+real OpenGL 3.3-capable machine using the reference command above.
