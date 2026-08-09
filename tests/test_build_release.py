@@ -16,6 +16,7 @@ WINDOWS_MEMBERS = (
     "TrajPlayer/_internal/python310.dll",
     "TrajPlayer/_internal/numpy/_core/_multiarray_umath.cp310-win_amd64.pyd",
     "TrajPlayer/_internal/numpy.libs/openblas.dll",
+    "TrajPlayer/_internal/trajplayer/_trajcore.cp310-win_amd64.pyd",
 )
 MACOS_MEMBERS = (
     "TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer",
@@ -23,6 +24,8 @@ MACOS_MEMBERS = (
     "_multiarray_umath.cpython-311-darwin.so",
     "TrajPlayer-macOS/TrajPlayer.app/Contents/Frameworks/PySide6/Qt/plugins/"
     "platforms/libqcocoa.dylib",
+    "TrajPlayer-macOS/TrajPlayer.app/Contents/Frameworks/trajplayer/"
+    "_trajcore.cpython-311-darwin.so",
 )
 
 
@@ -48,6 +51,19 @@ class BuildReleaseTests(unittest.TestCase):
                 path.touch()
 
             with self.assertRaisesRegex(SystemExit, "_multiarray_umath"):
+                validate_portable_tree(dist_root / "TrajPlayer", system="Windows")
+
+    def test_validate_portable_tree_rejects_missing_native_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            dist_root = Path(temporary_directory)
+            for member in WINDOWS_MEMBERS:
+                if "_trajcore" in member:
+                    continue
+                path = dist_root / member
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+
+            with self.assertRaisesRegex(SystemExit, "_trajcore"):
                 validate_portable_tree(dist_root / "TrajPlayer", system="Windows")
 
     def test_validate_portable_archive_checks_archive_members(self) -> None:

@@ -31,6 +31,7 @@ def _portable_runtime_patterns(system: str) -> tuple[str, ...]:
             "TrajPlayer/_internal/python*.dll",
             "TrajPlayer/_internal/numpy/_core/_multiarray_umath*.pyd",
             "TrajPlayer/_internal/numpy.libs/*.dll",
+            "TrajPlayer/**/_trajcore*.pyd",
         )
     if system == "Linux":
         return (
@@ -38,12 +39,14 @@ def _portable_runtime_patterns(system: str) -> tuple[str, ...]:
             "TrajPlayer/_internal/libpython3*.so*",
             "TrajPlayer/_internal/numpy/_core/_multiarray_umath*.so",
             "TrajPlayer/_internal/numpy.libs/*.so*",
+            "TrajPlayer/**/_trajcore*.so",
         )
     if system in {"Darwin", "macOS"}:
         return (
             "TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer",
             "TrajPlayer-macOS/TrajPlayer.app/Contents/Frameworks/*_multiarray_umath*.so",
             "TrajPlayer-macOS/TrajPlayer.app/Contents/Frameworks/*libqcocoa.dylib",
+            "TrajPlayer-macOS/**/_trajcore*.so",
         )
     raise SystemExit(f"Unsupported release platform: {system}")
 

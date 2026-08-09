@@ -15,6 +15,8 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         self.assertNotIn("collect_dynamic_libs('PySide6')", source)
         self.assertIn("'PySide6.QtOpenGLWidgets'", source)
         self.assertIn("'trajplayer._trajcore'", source)
+        self.assertIn("find_spec('trajplayer._trajcore')", source)
+        self.assertIn("extra_binaries.append((str(native_module), 'trajplayer'))", source)
         self.assertIn("'matplotlib'", source)
         self.assertIn("'IPython'", source)
 
@@ -24,6 +26,7 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         release_source = Path("scripts/build_release.py").read_text(encoding="utf-8")
         self.assertIn("base_dir=portable_dir.name", release_source)
         self.assertIn('"gztar"', release_source)
+        self.assertIn('"TrajPlayer/**/_trajcore*.so"', release_source)
 
     def test_macos_build_creates_a_native_app_bundle_and_preserves_it(self) -> None:
         spec_source = Path("TrajPlayer.spec").read_text(encoding="utf-8")

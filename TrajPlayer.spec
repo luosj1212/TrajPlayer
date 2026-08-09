@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 import sys
+from importlib.util import find_spec
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_dynamic_libs
 
@@ -11,6 +12,13 @@ from trajplayer import __display_version__
 
 
 extra_binaries = collect_dynamic_libs('chemfiles')
+native_spec = find_spec('trajplayer._trajcore')
+if native_spec is None or native_spec.origin is None:
+    raise RuntimeError('trajplayer._trajcore must be compiled before packaging')
+native_module = Path(native_spec.origin)
+if not native_module.is_file():
+    raise RuntimeError(f'trajplayer._trajcore was not found at {native_module}')
+extra_binaries.append((str(native_module), 'trajplayer'))
 if os.name == 'nt':
     conda_prefixes = [Path(sys.prefix)]
     if os.environ.get('CONDA_PREFIX'):
