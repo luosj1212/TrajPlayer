@@ -88,6 +88,11 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         self.assertNotIn('$env:QT_OPENGL = "software"', release)
         self.assertIn("Benchmark Linux portable runtime", release)
         self.assertIn("Benchmark macOS app bundle", release)
+        macos_benchmark = release.split(
+            "- name: Benchmark macOS app bundle", 1
+        )[1].split("- name: Upload package artifact", 1)[0]
+        self.assertIn("--benchmark-atoms=100000", macos_benchmark)
+        self.assertIn("--benchmark-render-frames=30", macos_benchmark)
 
     def test_native_extension_is_required_for_builds(self) -> None:
         setup_source = Path("setup.py").read_text(encoding="utf-8")

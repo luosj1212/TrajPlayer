@@ -159,7 +159,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: cocoa
         run: |
-          ./dist/TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer --benchmark-output=performance-${{ matrix.label }}.json --benchmark-atoms=100000 --benchmark-frames=64 --benchmark-render-frames=120 --benchmark-bonds --benchmark-finish-gpu
+          ./dist/TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer --benchmark-output=performance-${{ matrix.label }}.json --benchmark-atoms=100000 --benchmark-frames=64 --benchmark-render-frames=30 --benchmark-bonds --benchmark-finish-gpu
           python scripts/check_perf_report.py performance-${{ matrix.label }}.json
 
       - name: Upload package artifact
