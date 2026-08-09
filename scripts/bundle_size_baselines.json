@@ -1,0 +1,9 @@
+{
+  "version": "v0.1.0-alpha.5",
+  "platforms": {
+    "Windows-x64": 253678554,
+    "Linux-x86_64": 364865166,
+    "macOS-arm64": 182246066,
+    "macOS-x86_64": 197305386
+  }
+}

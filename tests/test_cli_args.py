@@ -12,6 +12,8 @@ class CliArgsTests(unittest.TestCase):
                 "--gui-smoke",
                 "--gui-smoke-output=C:/tmp/gui-smoke.json",
                 "--gui-smoke-timeout-ms=20000",
+                "--reader-smoke=C:/tmp/fixtures",
+                "--reader-smoke-output=C:/tmp/readers.json",
                 "--doctor-output=C:/tmp/doctor.json",
                 "--smoke-exit-ms=500",
                 "--benchmark-output=C:/tmp/out.json",
@@ -30,6 +32,8 @@ class CliArgsTests(unittest.TestCase):
         self.assertTrue(args.gui_smoke)
         self.assertEqual(args.gui_smoke_output, Path("C:/tmp/gui-smoke.json"))
         self.assertEqual(args.gui_smoke_timeout_ms, 20000)
+        self.assertEqual(args.reader_smoke, Path("C:/tmp/fixtures"))
+        self.assertEqual(args.reader_smoke_output, Path("C:/tmp/readers.json"))
         self.assertEqual(args.doctor_output, Path("C:/tmp/doctor.json"))
         self.assertEqual(args.smoke_exit_ms, 500)
         self.assertEqual(args.benchmark_output, Path("C:/tmp/out.json"))

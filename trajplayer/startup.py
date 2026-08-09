@@ -132,7 +132,7 @@ def configure_dll_search_path(root: Path | None = None) -> None:
     dll_dirs = (
         base_dir,
         base_dir / "numpy.libs",
-        base_dir / "scipy.libs",
+        base_dir / "chemfiles",
         base_dir / "PySide6",
         base_dir / "shiboken6",
     )

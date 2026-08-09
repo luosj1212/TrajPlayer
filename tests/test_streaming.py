@@ -190,6 +190,35 @@ class FrameStreamerTests(unittest.TestCase):
                 finally:
                     streamer.stop()
 
+    def test_streaming_stats_track_load_latency_throughput_and_hits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with BinaryTrajectoryStore.create(
+                Path(tmp) / "stats.tpdata",
+                frame_count=4,
+                atom_numbers=np.array([1], dtype=np.uint16),
+                symbols=["H"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+            ) as store:
+                streamer = FrameStreamer(store, prefetch_radius=0)
+                try:
+                    streamer.start()
+                    streamer.seek(0)
+                    self.assertIsNotNone(streamer.wait_for_frame(0, timeout_s=2.0))
+                    streamer.seek(0)
+                    stats = streamer.stats_snapshot()
+
+                    self.assertEqual(stats.loads, 1)
+                    self.assertGreaterEqual(stats.cache_hits, 1)
+                    self.assertGreaterEqual(stats.cache_misses, 1)
+                    self.assertGreater(stats.load_latency_ms, 0.0)
+                    self.assertGreater(stats.decoded_megabytes, 0.0)
+                    self.assertGreater(stats.decode_megabytes_per_second, 0.0)
+                    self.assertEqual(stats.effective_prefetch_frames, 1)
+                finally:
+                    streamer.stop()
+
     def test_loader_errors_are_propagated_and_wake_waiters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with BinaryTrajectoryStore.create(

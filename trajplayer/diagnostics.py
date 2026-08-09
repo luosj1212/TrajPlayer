@@ -16,10 +16,9 @@ from .startup import redact_path
 
 DIAGNOSTIC_PACKAGES = (
     "ase",
-    "MDAnalysis",
+    "chemfiles",
     "numpy",
     "PySide6",
-    "scipy",
 )
 
 
@@ -58,7 +57,10 @@ def collect_diagnostics(
             "log": redact_path(log_path),
             "log_directory": redact_path(log_directory),
             "log_directory_writable": directory_is_writable(log_directory),
-            "trajectory_cache": "sidecar .tpdata directory beside each source trajectory",
+            "trajectory_cache": (
+                "direct random-access readers; XYZ/extXYZ use a small progressive "
+                ".tpindex offset index"
+            ),
         },
     }
 

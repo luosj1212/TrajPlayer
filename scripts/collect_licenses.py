@@ -8,12 +8,11 @@ from pathlib import Path
 
 RUNTIME_DISTRIBUTIONS = (
     "ase",
-    "MDAnalysis",
+    "chemfiles",
     "numpy",
     "PySide6",
     "PySide6-Addons",
     "PySide6-Essentials",
-    "scipy",
     "shiboken6",
 )
 LICENSE_PREFIXES = ("license", "copying", "notice", "copyright")

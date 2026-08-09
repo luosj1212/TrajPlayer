@@ -17,6 +17,7 @@ for file in \
     DISTRIBUTION_README.txt \
     LICENSE \
     pyproject.toml \
+    setup.py \
     README.md \
     requirements-dev.txt \
     requirements-linux.txt \

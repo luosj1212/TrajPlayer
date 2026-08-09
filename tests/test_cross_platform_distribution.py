@@ -57,6 +57,8 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         self.assertIn("--gui-smoke", ci)
         self.assertIn("xvfb-run", ci)
         self.assertIn("--gui-smoke", release)
+        self.assertIn("--reader-smoke", ci)
+        self.assertIn("--reader-smoke", release)
         self.assertIn("xvfb-run", release)
         self.assertIn("libgl1-mesa-dri", release)
         self.assertIn("macos-15", ci)

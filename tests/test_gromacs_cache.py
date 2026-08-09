@@ -1,10 +1,11 @@
 import tempfile
 import unittest
-import warnings
 from pathlib import Path
 
-import MDAnalysis as mda
 import numpy as np
+from ase import Atoms
+from ase.io import write
+from chemfiles import Frame, Trajectory, UnitCell
 
 from trajplayer.ase_cache import build_cache_from_source, open_valid_cache
 from trajplayer.gromacs_cache import inspect_gromacs_source
@@ -67,35 +68,27 @@ class GromacsCacheTests(unittest.TestCase):
 
     @staticmethod
     def _write_gromacs_pair(topology: Path, trajectory: Path) -> np.ndarray:
-        universe = mda.Universe.empty(
-            3,
-            n_residues=1,
-            atom_resindex=np.zeros(3, dtype=np.int32),
-            trajectory=True,
+        initial = np.array(
+            [[1.0, 2.0, 3.0], [1.9, 2.0, 3.0], [0.7, 2.8, 3.0]],
+            dtype=np.float32,
         )
-        universe.add_TopologyAttr("names", ["O", "H1", "H2"])
-        universe.add_TopologyAttr("types", ["O", "H", "H"])
-        universe.add_TopologyAttr("resnames", ["SOL"])
-        universe.add_TopologyAttr("resids", [1])
-        universe.add_TopologyAttr("ids", [1, 2, 3])
-        universe.dimensions = np.array([20.0, 21.0, 22.0, 90.0, 90.0, 90.0], dtype=np.float32)
+        write(
+            topology,
+            Atoms("OH2", positions=initial, cell=[20.0, 21.0, 22.0], pbc=True),
+            format="gromacs",
+        )
         frames = np.empty((4, 3, 3), dtype=np.float32)
-
-        universe.atoms.positions = np.array(
-            [[1.0, 2.0, 3.0], [1.9, 2.0, 3.0], [0.7, 2.8, 3.0]], dtype=np.float32
-        )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with mda.Writer(str(topology), n_atoms=3) as writer:
-                writer.write(universe.atoms)
-            with mda.Writer(str(trajectory), n_atoms=3) as writer:
-                for frame_index in range(4):
-                    frames[frame_index] = universe.atoms.positions + np.float32(frame_index * 0.25)
-                    universe.atoms.positions = frames[frame_index]
-                    universe.dimensions = np.array(
-                        [20.0, 21.0, 22.0, 90.0, 90.0, 90.0], dtype=np.float32
-                    )
-                    writer.write(universe.atoms)
+        writer = Trajectory(str(trajectory), mode="w")
+        try:
+            for frame_index in range(4):
+                frames[frame_index] = initial + np.float32(frame_index * 0.25)
+                frame = Frame()
+                frame.resize(3)
+                frame.positions[:] = frames[frame_index]
+                frame.cell = UnitCell([20.0, 21.0, 22.0])
+                writer.write(frame)
+        finally:
+            writer.close()
         return frames
 
 

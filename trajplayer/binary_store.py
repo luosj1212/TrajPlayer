@@ -151,6 +151,10 @@ class BinaryTrajectoryStore:
         return self.cells is not None
 
     @property
+    def frame_count_is_final(self) -> bool:
+        return True
+
+    @property
     def is_complete(self) -> bool:
         return bool(self.metadata.get("complete", True))
 
@@ -388,6 +392,23 @@ class BinaryTrajectoryStore:
         if frame_index < 0 or frame_index >= self.frame_count:
             raise IndexError(frame_index)
         return self.positions[frame_index]
+
+    def read_frame_arrays(self, frame_index: int) -> tuple[np.ndarray, np.ndarray | None]:
+        return self.frame(frame_index), self.cell(frame_index)
+
+    def read_frame_into(
+        self,
+        frame_index: int,
+        positions: np.ndarray,
+        cell: np.ndarray | None,
+    ) -> None:
+        np.copyto(positions, self.frame(frame_index))
+        if cell is not None:
+            source_cell = self.cell(frame_index)
+            if source_cell is None:
+                cell.fill(0.0)
+            else:
+                np.copyto(cell, source_cell)
 
     def cell(self, frame_index: int) -> np.ndarray | None:
         if self.cells is None:

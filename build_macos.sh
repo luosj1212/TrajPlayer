@@ -13,7 +13,7 @@ venv_dir="${TRAJPLAYER_BUILD_VENV:-.venv-build-macos}"
 python3 -m venv "$venv_dir"
 source "$venv_dir/bin/activate"
 python -m pip install --upgrade pip
-python -m pip install -r requirements-dev.txt
+python -m pip install -e ".[dev]"
 python -m pytest -q
 python scripts/check_release.py
 python scripts/build_release.py

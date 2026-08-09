@@ -46,7 +46,16 @@ jobs:
       - name: Test
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q
+        run: |
+          python -c "from trajplayer.trajcore import NATIVE_AVAILABLE; assert NATIVE_AVAILABLE"
+          python -m pytest -q
+
+      - name: Exercise every trajectory reader
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python scripts/create_smoke_fixtures.py --output smoke-fixtures
+          python app.py --reader-smoke=smoke-fixtures --reader-smoke-output=reader-smoke.json
 
       # GitHub's hosted Windows desktop session has no OpenGL 3.3 context.
       # Keep the Windows job responsible for imports/startup; Linux and macOS

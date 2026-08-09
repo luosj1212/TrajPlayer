@@ -2,6 +2,7 @@
 import os
 import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_dynamic_libs
 
 project_root = Path(SPECPATH)
 sys.path.insert(0, str(project_root))
@@ -9,7 +10,7 @@ sys.path.insert(0, str(project_root))
 from trajplayer import __display_version__
 
 
-extra_binaries = []
+extra_binaries = collect_dynamic_libs('chemfiles')
 if os.name == 'nt':
     conda_prefixes = [Path(sys.prefix)]
     if os.environ.get('CONDA_PREFIX'):
@@ -42,20 +43,9 @@ a = Analysis(
     hiddenimports=[
         'numpy._core._multiarray_umath',
         'numpy._core._multiarray_tests',
-        'ase.io.trajectory',
-        'ase.io.xyz',
-        'ase.io.extxyz',
-        'ase.io.proteindatabank',
-        'ase.io.cif',
-        'ase.io.gromacs',
-        'MDAnalysis.coordinates.XTC',
-        'MDAnalysis.coordinates.TRR',
-        'MDAnalysis.topology.GROParser',
-        'MDAnalysis.lib.formats.libmdaxdr',
-        'MDAnalysis.lib.formats.cython_util',
-        'MDAnalysis.lib._transformations',
-        'scipy.spatial._ckdtree',
-        'scipy.sparse.csgraph._traversal',
+        'ase.data',
+        'ase.data.colors',
+        'chemfiles',
         'PySide6.QtOpenGL',
         'PySide6.QtOpenGLWidgets',
     ],
@@ -73,9 +63,11 @@ a = Analysis(
         'jupyter_core',
         'kiwisolver',
         'matplotlib',
+        'MDAnalysis',
         'nbformat',
         'notebook',
         'parso',
+        'scipy',
         'tkinter',
         'traitlets',
         'zmq',

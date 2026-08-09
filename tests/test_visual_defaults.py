@@ -2,15 +2,22 @@ import unittest
 from pathlib import Path
 
 
+APP_SOURCE = Path("app.py").read_text(encoding="utf-8")
+UI_SOURCE = Path("trajplayer/ui/main_window.py").read_text(encoding="utf-8")
+WORKER_SOURCE = Path("trajplayer/workers.py").read_text(encoding="utf-8")
+COMMAND_SOURCE = Path("trajplayer/commands.py").read_text(encoding="utf-8")
+WINDOW_SOURCE = APP_SOURCE + UI_SOURCE
+
+
 class VisualDefaultTests(unittest.TestCase):
     def test_window_accepts_gromacs_topology_and_trajectory_together(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = WINDOW_SOURCE
         self.assertIn("getOpenFileNames", source)
         self.assertIn("*.gro *.xtc *.trr", source)
         self.assertIn("load_trajectory_paths", source)
 
     def test_macos_finder_open_events_are_coalesced_for_gromacs_pairs(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = APP_SOURCE
 
         self.assertIn("class TrajPlayerApplication(QApplication):", source)
         self.assertIn("QEvent.Type.FileOpen", source)
@@ -20,20 +27,20 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn("self.load_trajectory_paths(paths)", source)
 
     def test_window_enables_ball_and_stick_for_real_trajectories_by_default(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = APP_SOURCE
 
         loaded_start = source.index("def on_trajectory_loaded")
         loaded_stop = source.index("def start_benchmark")
         loaded_source = source[loaded_start:loaded_stop]
 
-        self.assertIn("class BondInferenceThread(QThread):", source)
+        self.assertIn("class BondInferenceThread(QThread):", WORKER_SOURCE)
         self.assertIn("self.start_bond_inference(store)", loaded_source)
         self.assertIn("self.gl_view.set_bonds(topology.bonds)", source)
         self.assertIn('store.metadata.get("synthetic")', source)
         self.assertIn("self.gl_view.set_render_mode", loaded_source)
 
     def test_bond_inference_source_is_visible_and_can_be_disabled(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = WINDOW_SOURCE
 
         self.assertIn('self.infer_bonds_check = QCheckBox("Infer bonds")', source)
         self.assertIn("self.infer_bonds_check.toggled.connect", source)
@@ -42,26 +49,26 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn("inferred from frame 1", source)
 
     def test_open_shortcut_uses_the_platform_standard_binding(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = COMMAND_SOURCE
 
         self.assertIn("QKeySequence.StandardKey.Open", source)
-        self.assertNotIn('(QKeySequence("O"), self.open_file)', source)
+        self.assertNotIn("QShortcut", APP_SOURCE)
 
     def test_render_timer_sleeps_while_the_viewer_is_idle(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = APP_SOURCE
 
         self.assertIn("self.render_timer.setSingleShot(True)", source)
         self.assertIn("self.render_timer.start(max(1, int(math.ceil", source)
         self.assertNotIn("self.render_timer.start()", source)
 
     def test_switching_trajectories_does_not_wait_for_stream_io_on_the_ui_thread(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = APP_SOURCE
 
         self.assertIn("streamer.stop(timeout_s=0.0)", source)
         self.assertIn("self._retired_streamers[streamer] = store", source)
 
     def test_window_exposes_gpu_ball_stick_ball_and_bond_size_controls(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = WINDOW_SOURCE
 
         self.assertIn('self.render_mode_combo.addItem("Ball-stick", "ball_stick")', source)
         self.assertIn('self.render_mode_combo.addItem("Ball", "ball")', source)
@@ -77,7 +84,7 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn("self.gl_view.set_bond_size_scale", source)
 
     def test_window_exposes_box_toggle_when_cells_are_available(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = WINDOW_SOURCE
 
         self.assertIn('QCheckBox("Box")', source)
         self.assertIn("self.box_check.toggled.connect", source)
@@ -85,7 +92,7 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn("cell=lease.cell", source)
 
     def test_playback_waits_for_frame_swap_and_never_uses_synchronous_repaint(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = APP_SOURCE
         renderer = Path("trajplayer/gl_view.py").read_text(encoding="utf-8")
 
         self.assertIn("self.gl_view.frameSwapped.connect(self.on_frame_swapped)", source)
@@ -94,17 +101,17 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertNotIn("set_immediate_paint", source)
         self.assertNotIn("self.repaint()", renderer)
 
-    def test_random_access_cache_only_decodes_requested_prefetch_frames(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
-        method = source.split("def _fill_random_access_cache(", 1)[1]
-        method = method.split("class BondInferenceThread", 1)[0]
+    def test_random_access_sources_bypass_the_decoded_sidecar(self) -> None:
+        source = WORKER_SOURCE
+        reader = Path("trajplayer/random_access_cache.py").read_text(encoding="utf-8")
 
-        self.assertIn("self._request_condition.wait()", method)
-        self.assertIn("self._requested_indices", method)
-        self.assertNotIn("background_index", method)
+        self.assertIn("open_direct_random_access_store", source)
+        self.assertIn('"direct_reader": True', reader)
+        self.assertIn('"persistent_decoded_cache": False', reader)
+        self.assertNotIn("def _fill_random_access_cache(", source)
 
     def test_transport_ui_uses_compact_icon_controls_and_60fps_scrubbing(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = WINDOW_SOURCE
 
         self.assertIn("self.prev_button = QToolButton()", source)
         self.assertIn("self.play_button = QToolButton()", source)
@@ -117,7 +124,7 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn('transport_bar.setObjectName("transportBar")', source)
 
     def test_playback_speed_is_adjustable_without_frame_skipping(self) -> None:
-        app_source = Path("app.py").read_text(encoding="utf-8")
+        app_source = WINDOW_SOURCE
         engine_source = Path("trajplayer/playback.py").read_text(encoding="utf-8")
 
         self.assertIn("self.playback_speed_slider.setRange(1, int(self.TARGET_FPS))", app_source)
@@ -128,7 +135,7 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn("dropped_frames=0", engine_source)
 
     def test_window_can_isolate_a_chain_or_atom_without_per_frame_filtering(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = WINDOW_SOURCE
 
         self.assertIn("self.filter_mode_group = QButtonGroup(self)", source)
         self.assertIn('(("All", "all", 38), ("Chain", "chain", 52), ("Atom", "atom", 46))', source)
@@ -144,7 +151,7 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertNotIn("QSpinBox", source)
         self.assertIn("def apply_visibility_filter(self) -> None:", source)
         self.assertIn("self.gl_view.set_visible_atoms", source)
-        self.assertIn("connected_components", source)
+        self.assertIn("connected_components", WORKER_SOURCE)
 
 
 if __name__ == "__main__":

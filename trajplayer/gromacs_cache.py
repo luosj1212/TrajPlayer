@@ -8,6 +8,8 @@ from typing import Callable
 import numpy as np
 
 from .binary_store import BinaryTrajectoryStore, cache_dir_for_source, prepare_cache_directory
+from .gromacs_reader import ChemfilesGromacsReader
+from .structure_reader import read_structure
 from .trajectory_source import TrajectorySource
 
 
@@ -25,30 +27,22 @@ class GromacsTrajectorySummary:
 
 
 def inspect_gromacs_source(source: TrajectorySource) -> GromacsTrajectorySummary:
-    from ase.io import read
-
     topology_path, trajectory_path = _validated_paths(source)
-    topology_atoms = read(str(topology_path), format="gromacs")
-    universe = _open_universe(topology_path, trajectory_path)
+    topology = read_structure(topology_path)
+    reader = ChemfilesGromacsReader(
+        trajectory_path,
+        expected_atom_count=topology.positions.shape[0],
+    )
     try:
-        frame_count = len(universe.trajectory)
-        if frame_count <= 0:
-            raise ValueError("No frames found in Gromacs trajectory")
-        if len(topology_atoms) != universe.atoms.n_atoms:
-            raise ValueError(
-                f"GRO topology has {len(topology_atoms)} atoms but {trajectory_path.name} has "
-                f"{universe.atoms.n_atoms} atoms"
-            )
-        first_timestep = universe.trajectory[0]
         return GromacsTrajectorySummary(
-            frame_count=frame_count,
-            atom_count=len(topology_atoms),
-            atom_numbers=np.asarray(topology_atoms.get_atomic_numbers(), dtype=np.uint16),
-            symbols=list(topology_atoms.get_chemical_symbols()),
-            has_cell=_cell_from_timestep(first_timestep) is not None,
+            frame_count=reader.frame_count,
+            atom_count=topology.positions.shape[0],
+            atom_numbers=topology.atom_numbers,
+            symbols=list(topology.symbols),
+            has_cell=reader.has_cell,
         )
     finally:
-        universe.trajectory.close()
+        reader.close()
 
 
 def build_cache_from_gromacs(
@@ -79,14 +73,17 @@ def build_cache_from_gromacs(
         temporary_cache=temporary_cache,
     )
 
-    universe = _open_universe(topology_path, trajectory_path)
+    reader = ChemfilesGromacsReader(
+        trajectory_path,
+        expected_atom_count=summary.atom_count,
+    )
     try:
-        for frame_index, timestep in enumerate(universe.trajectory):
+        for frame_index in range(summary.frame_count):
             if cancel_event is not None and cancel_event.is_set():
                 from .ase_cache import ConversionCancelled
 
                 raise ConversionCancelled(f"Cancelled conversion for {trajectory_path}")
-            positions = np.asarray(timestep.positions, dtype=np.float32)
+            positions, cell = reader.read_frame(frame_index)
             if positions.shape != (summary.atom_count, 3):
                 raise ValueError(
                     f"Frame {frame_index} has position shape {positions.shape}; "
@@ -94,7 +91,6 @@ def build_cache_from_gromacs(
                 )
             store.positions[frame_index, :, :] = positions
             if store.cells is not None:
-                cell = _cell_from_timestep(timestep)
                 store.cells[frame_index, :, :] = 0.0 if cell is None else cell
             store.mark_frame_available(frame_index + 1)
             if frame_index == 0 and preview_callback is not None:
@@ -107,7 +103,7 @@ def build_cache_from_gromacs(
         store.close()
         raise
     finally:
-        universe.trajectory.close()
+        reader.close()
     return store
 
 
@@ -117,21 +113,3 @@ def _validated_paths(source: TrajectorySource) -> tuple[Path, Path]:
     topology_path = source.topology_path.resolve()
     trajectory_path = source.trajectory_path.resolve()
     return topology_path, trajectory_path
-
-
-def _open_universe(topology_path: Path, trajectory_path: Path):
-    try:
-        import MDAnalysis as mda
-    except ImportError as exc:
-        raise RuntimeError("Gromacs XTC/TRR support requires a complete MDAnalysis installation") from exc
-    return mda.Universe(str(topology_path), str(trajectory_path), in_memory=False)
-
-
-def _cell_from_timestep(timestep) -> np.ndarray | None:
-    cell = getattr(timestep, "triclinic_dimensions", None)
-    if cell is None:
-        return None
-    matrix = np.ascontiguousarray(cell, dtype=np.float32)
-    if matrix.shape != (3, 3) or not np.any(matrix):
-        return None
-    return matrix

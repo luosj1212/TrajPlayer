@@ -1,4 +1,4 @@
-TrajPlayer v0.1.0-alpha.5 distribution
+TrajPlayer v0.1.0-alpha.6 distribution
 
 Windows
 1. Extract the entire TrajPlayer folder from the zip archive.
@@ -52,8 +52,9 @@ Display
 - Playback speed is adjustable from 1 to 60 FPS. Frames are always displayed in sequence and are never skipped.
 
 Performance
-- Traj, XTC, and TRR trajectories decode the requested directional window on demand instead of filling the entire float32 cache while idle.
-- RAM prefetch is selected automatically from the frame size and currently available memory.
-- XYZ and extXYZ trajectories use a reusable frame-offset index for direct frame reads.
+- Traj, XTC, and TRR trajectories decode the requested directional window directly instead of creating a full float32 sidecar.
+- RAM prefetch is selected automatically from frame size, available memory, renderer/topology reservations, read latency, and cache-hit behavior.
+- XYZ and extXYZ show frame 1 first, then build a reusable frame-offset index in the background.
+- Chemfiles provides structure and XTC/TRR decoding; portable builds do not bundle SciPy or MDAnalysis.
 - Hybrid-GPU Windows laptops automatically request the NVIDIA high-performance GPU when available.
 - Keep current graphics drivers installed; TrajPlayer falls back to the available OpenGL 3.3 GPU.

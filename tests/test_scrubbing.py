@@ -28,7 +28,9 @@ class SliderScrubStateTests(unittest.TestCase):
         self.assertIsNone(scrub.pending_frame)
 
     def test_window_wires_slider_drag_to_realtime_preview(self) -> None:
-        source = Path("app.py").read_text(encoding="utf-8")
+        source = Path("app.py").read_text(encoding="utf-8") + Path(
+            "trajplayer/ui/main_window.py"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("self.frame_slider.setTracking(False)", source)
         self.assertIn("self.frame_slider.sliderMoved.connect(self.on_frame_slider_moved)", source)

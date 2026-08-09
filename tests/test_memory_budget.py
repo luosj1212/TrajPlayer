@@ -3,6 +3,7 @@ import unittest
 from trajplayer.memory_budget import (
     MAX_FRAME_CACHE_BYTES,
     MIB,
+    MemoryBudgetManager,
     choose_frame_cache_budget,
 )
 
@@ -59,6 +60,25 @@ class MemoryBudgetTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.bytes, MAX_FRAME_CACHE_BYTES)
+
+    def test_manager_accounts_for_all_viewer_working_sets(self) -> None:
+        allocation = MemoryBudgetManager(
+            atom_count=1_000_000,
+            available_bytes=8 * 1024 * MIB,
+        ).allocate(
+            frame_bytes=12 * MIB,
+            frame_count=1_000,
+            prefetch_radius=200,
+            persistent_writer_bytes=8 * MIB,
+        )
+
+        self.assertEqual(allocation.renderer_bytes, 32_000_000)
+        self.assertEqual(allocation.topology_bytes, 16_000_000)
+        self.assertEqual(allocation.persistent_writer_bytes, 8 * MIB)
+        self.assertEqual(
+            allocation.total_bytes,
+            allocation.frame_cache.bytes + allocation.reserved_working_set_bytes,
+        )
 
 
 if __name__ == "__main__":

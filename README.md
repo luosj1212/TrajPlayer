@@ -37,9 +37,13 @@ continue in the specialized tools users already prefer.
 ## Highlights
 
 - OpenGL instanced atoms and bonds with no per-atom CPU drawing loop
-- Contiguous `(T, N, 3)` float32 decoded data backed by `numpy.memmap`
-- Background streaming, direction-aware prefetch, and a 64-256 MiB adaptive frame cache
-- Target-first random access with demand-driven sparse decoded sidecars
+- Direct random-access readers for ASE `.traj`, XYZ/extXYZ, GRO, PDB, CIF,
+  XTC, and TRR
+- Progressive XYZ indexing: frame 1 opens before the full file scan finishes
+- Background streaming, direction-aware prefetch, and a unified 64-256 MiB
+  memory budget with I/O latency and cache-hit telemetry
+- Frame leases that upload contiguous float32 positions without a second
+  renderer-side full-frame copy
 - Live slider scrubbing without waiting for mouse release
 - Sequential 1-60 FPS playback with no trajectory-frame skipping
 - Ball-stick, Ball, and Bond representations with adjustable radii
@@ -47,6 +51,8 @@ continue in the specialized tools users already prefer.
   chain lists and ranges can be entered as `1,3-5`
 - Explicit bond-source status with optional static frame-1 inference
 - Portable Windows x64, Linux x86_64, and macOS Apple Silicon/Intel packages
+- Lightweight Chemfiles structure/Gromacs backend and optional native `trajcore`
+  hot paths; portable builds do not bundle SciPy or MDAnalysis
 
 ## Downloads
 
@@ -57,7 +63,7 @@ are different from the source archive offered by **Code > Download ZIP**.
 ### Windows Portable Package
 
 1. Open GitHub Releases and download
-   `TrajPlayer-Windows-x64-v0.1.0-alpha.5.zip`, not the source-code ZIP.
+   `TrajPlayer-Windows-x64-v0.1.0-alpha.6.zip`, not the source-code ZIP.
 2. Extract the archive completely.
 3. Run `TrajPlayer\TrajPlayer.exe` from the extracted directory.
 4. Use **Open** or drag trajectory files into the application window.
@@ -82,7 +88,7 @@ extracted `TrajPlayer` folder and run:
 
 ### Linux Portable Package
 
-Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.5.tar.gz` from GitHub Releases
+Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.6.tar.gz` from GitHub Releases
 and extract the complete archive. Python is not required. Then run:
 
 ```bash
@@ -100,8 +106,8 @@ Generate the same report with
 Download the ZIP that matches the Mac:
 
 - Apple Silicon (M1 or newer):
-  `TrajPlayer-macOS-arm64-v0.1.0-alpha.5.zip`
-- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.5.zip`
+  `TrajPlayer-macOS-arm64-v0.1.0-alpha.6.zip`
+- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.6.zip`
 
 Extract the complete ZIP, then open `TrajPlayer-macOS/TrajPlayer.app`. Python
 and Conda are not required. The app can be moved to `/Applications` as a whole;
@@ -134,11 +140,11 @@ Generate a diagnostics report from Terminal with:
 
 | Input | Support | Access strategy |
 | --- | --- | --- |
-| ASE `.traj` | Trajectory | Native target-first reads plus sidecar cache |
-| `.xyz`, `.extxyz` | Trajectory | Reusable byte-offset index plus sidecar cache |
-| Gromacs `.xtc`, `.trr` | Trajectory | Pair with a `.gro` topology; native target-first reads |
+| ASE `.traj` | Trajectory | Direct target-first reads; no decoded sidecar required |
+| `.xyz`, `.extxyz` | Trajectory | Direct reads with a reusable progressive byte-offset index |
+| Gromacs `.xtc`, `.trr` | Trajectory | Direct Chemfiles reads paired with a `.gro` topology |
 | `.gro` | Structure/topology | Open alone or together with XTC/TRR |
-| `.pdb`, `.cif` | Structure | Read through ASE |
+| `.pdb`, `.cif` | Structure | Direct Chemfiles read |
 
 For XTC/TRR, select or drop the trajectory and GRO file together. Opening the
 trajectory alone also works when a same-named GRO file is beside it.
@@ -214,10 +220,10 @@ architecture.
 
 ```mermaid
 flowchart LR
-    UI["Qt controls"] --> P["Playback clock"]
+    UI["Qt view + QAction commands"] --> P["Playback clock"]
     P --> Q["One-frame present queue"]
-    D["Trajectory reader"] --> M["Demand-driven decoded memmap cache"]
-    M --> S["Adaptive RAM frame cache"]
+    D["Direct trajectory reader"] --> S["Adaptive RAM frame cache"]
+    D -. optional .-> C["Persistent/index cache"]
     S --> L["Frame lease"]
     L --> G["OpenGL upload buffers"]
     G --> R["Instanced atom and bond draws"]
@@ -225,11 +231,12 @@ flowchart LR
     A --> P
 ```
 
-The UI thread schedules work and submits one ready frame at a time. Trajectory
-I/O, indexing, cache population, and filter-buffer preparation remain off the
-UI thread. Random-access readers decode only the requested directional window;
-they no longer fill the complete sidecar while idle. A frame lease pins each RAM
-slot while the renderer owns the current frame, avoiding a second full-frame CPU copy.
+The Qt view is separated from the controller and background workers. The UI
+thread schedules work and submits one ready frame at a time; trajectory I/O,
+progressive indexing, decoding, and bond inference remain off it. Random-access
+readers decode only the adaptive directional window and do not require a full
+decoded sidecar. A frame lease pins each RAM slot while the renderer owns the
+current frame, avoiding a second full-frame CPU copy.
 Playback advances only after `frameSwapped`, so slow hardware lowers cadence
 instead of skipping trajectory frames or blocking controls with synchronous
 painting.
@@ -265,7 +272,7 @@ python scripts/report_bundle_size.py
 
 ## Requirements
 
-- Python 3.10 or 3.11 when running from source
+- Python 3.10, 3.11, or 3.12 when running from source
 - OpenGL 3.3 capable GPU and current graphics driver
 - Windows 10/11 x64
 - Linux x86_64 with Qt XCB runtime libraries
@@ -285,7 +292,8 @@ sudo apt-get install libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 \
 - No ribbon, molecular surface, volume, label, or publication renderer
 - No built-in RMSD/RMSF analysis, measurements, scripting API, or video export
 - XTC/TRR requires a compatible GRO topology
-- Requested decoded frames consume additional sidecar disk space; the cache is invalidated when its source changes
+- XYZ/extXYZ creates a small reusable `.tpindex` offset index beside the source
+  when that location is writable, with a per-user cache fallback otherwise
 
 ## Development
 

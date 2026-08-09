@@ -4,18 +4,37 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 
-from .binary_store import BinaryTrajectoryStore
+from .frame_store import FrameStore
 from .memory_budget import (
     FrameCacheBudget,
-    choose_frame_cache_budget,
-    estimate_viewer_working_set_bytes,
+    MemoryBudgetManager,
+    ViewerMemoryAllocation,
 )
 
 
 DEFAULT_INTERACTIVE_PREFETCH_FRAMES = 5
+DEFAULT_IDLE_PREFETCH_FRAMES = 64
+LOAD_LATENCY_EWMA_ALPHA = 0.2
+
+
+@dataclass(frozen=True)
+class FrameStreamerStats:
+    loads: int
+    cache_hits: int
+    cache_misses: int
+    load_latency_ms: float
+    decoded_megabytes: float
+    decode_megabytes_per_second: float
+    effective_prefetch_frames: int
+
+    @property
+    def cache_hit_rate(self) -> float:
+        attempts = self.cache_hits + self.cache_misses
+        return 0.0 if attempts == 0 else self.cache_hits / attempts
 
 
 class FrameLease:
@@ -62,7 +81,7 @@ class FrameStreamer:
 
     def __init__(
         self,
-        store: BinaryTrajectoryStore,
+        store: FrameStore,
         *,
         prefetch_radius: int = 200,
         max_memory_bytes: int | None = None,
@@ -84,14 +103,14 @@ class FrameStreamer:
         if store.has_cells:
             self.frame_bytes += int(3 * 3 * np.dtype(np.float32).itemsize)
         if max_memory_bytes is None:
-            self.memory_budget = choose_frame_cache_budget(
+            self.memory_allocation = MemoryBudgetManager(
+                atom_count=store.atom_count,
+            ).allocate(
                 frame_bytes=self.frame_bytes,
                 frame_count=store.frame_count,
                 prefetch_radius=self.prefetch_radius,
-                reserved_working_set_bytes=estimate_viewer_working_set_bytes(
-                    store.atom_count
-                ),
             )
+            self.memory_budget = self.memory_allocation.frame_cache
             self.max_memory_bytes = self.memory_budget.bytes
         else:
             self.max_memory_bytes = int(max_memory_bytes)
@@ -101,9 +120,16 @@ class FrameStreamer:
                 reserved_working_set_bytes=0,
                 mode="fixed",
             )
+            self.memory_allocation = ViewerMemoryAllocation(
+                frame_cache=self.memory_budget,
+                renderer_bytes=0,
+                topology_bytes=0,
+                persistent_writer_bytes=0,
+            )
         radius_capacity = self.prefetch_radius * 2 + 1
         budget_capacity = max(1, self.max_memory_bytes // max(1, self.frame_bytes))
-        self.capacity = min(store.frame_count, radius_capacity, budget_capacity)
+        source_capacity = store.frame_count if store.frame_count_is_final else radius_capacity
+        self.capacity = min(source_capacity, radius_capacity, budget_capacity)
 
         self._buffer = np.empty((self.capacity, store.atom_count, 3), dtype=np.float32)
         self._cell_buffer = (
@@ -126,6 +152,16 @@ class FrameStreamer:
         self._index_to_slot: dict[int, int] = {}
         self._slot_to_index: dict[int, int] = {}
         self._slot_lease_counts = np.zeros(self.capacity, dtype=np.int32)
+        self._loads = 0
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._load_latency_ewma_s = 0.0
+        self._decoded_bytes = 0
+        self._load_time_s = 0.0
+        self._effective_prefetch_frames = min(
+            self.capacity,
+            DEFAULT_IDLE_PREFETCH_FRAMES,
+        )
 
     @property
     def memory_bytes(self) -> int:
@@ -141,6 +177,23 @@ class FrameStreamer:
     def is_alive(self) -> bool:
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
+
+    def stats_snapshot(self) -> FrameStreamerStats:
+        with self._lock:
+            throughput = (
+                0.0
+                if self._load_time_s <= 0.0
+                else (self._decoded_bytes / (1024.0 * 1024.0)) / self._load_time_s
+            )
+            return FrameStreamerStats(
+                loads=self._loads,
+                cache_hits=self._cache_hits,
+                cache_misses=self._cache_misses,
+                load_latency_ms=self._load_latency_ewma_s * 1000.0,
+                decoded_megabytes=self._decoded_bytes / (1024.0 * 1024.0),
+                decode_megabytes_per_second=throughput,
+                effective_prefetch_frames=self._effective_prefetch_frames,
+            )
 
     def start(self) -> None:
         with self._lock:
@@ -179,6 +232,10 @@ class FrameStreamer:
         )
         target_set = set(target_indices)
         with self._ready:
+            if frame_index in self._index_to_slot:
+                self._cache_hits += 1
+            else:
+                self._cache_misses += 1
             request_changed = (
                 frame_index != self._center
                 or direction != self._direction
@@ -245,6 +302,15 @@ class FrameStreamer:
     def notify_store_updated(self) -> None:
         """Wake the loader after a progressive cache publishes more frames."""
         with self._ready:
+            self._target_indices = self._ordered_window_indices(
+                self._center,
+                direction=self._direction,
+                interactive=self._interactive,
+            )
+            new_target_set = set(self._target_indices)
+            if new_target_set != self._target_set:
+                self._generation += 1
+                self._target_set = new_target_set
             self._request_serial += 1
             self._ready.notify_all()
 
@@ -345,11 +411,13 @@ class FrameStreamer:
                     if slot is None:
                         continue
 
-                np.copyto(self._buffer[slot], self.store.frame(frame_index))
-                if self._cell_buffer is not None:
-                    cell = self.store.cell(frame_index)
-                    if cell is not None:
-                        np.copyto(self._cell_buffer[slot], cell)
+                load_started_s = time.perf_counter()
+                self.store.read_frame_into(
+                    frame_index,
+                    self._buffer[slot],
+                    None if self._cell_buffer is None else self._cell_buffer[slot],
+                )
+                load_elapsed_s = max(0.0, time.perf_counter() - load_started_s)
 
                 notify_index: int | None = None
                 with self._ready:
@@ -358,6 +426,17 @@ class FrameStreamer:
                         break
                     self._index_to_slot[frame_index] = slot
                     self._slot_to_index[slot] = frame_index
+                    self._loads += 1
+                    self._decoded_bytes += self.frame_bytes
+                    self._load_time_s += load_elapsed_s
+                    if self._load_latency_ewma_s <= 0.0:
+                        self._load_latency_ewma_s = load_elapsed_s
+                    else:
+                        alpha = LOAD_LATENCY_EWMA_ALPHA
+                        self._load_latency_ewma_s = (
+                            alpha * load_elapsed_s
+                            + (1.0 - alpha) * self._load_latency_ewma_s
+                        )
                     if frame_index == self._center:
                         notify_index = frame_index
                     self._ready.notify_all()
@@ -375,6 +454,11 @@ class FrameStreamer:
         target_count = self.capacity
         if interactive:
             target_count = min(target_count, self.interactive_prefetch_frames)
+        elif direction == 0:
+            target_count = self._adaptive_idle_prefetch_count()
+
+        with self._lock:
+            self._effective_prefetch_frames = target_count
 
         ordered = [center]
         if direction == 0:
@@ -398,6 +482,23 @@ class FrameStreamer:
                 if len(ordered) >= target_count:
                     break
         return tuple(ordered[:target_count])
+
+    def _adaptive_idle_prefetch_count(self) -> int:
+        with self._lock:
+            if self.capacity <= DEFAULT_IDLE_PREFETCH_FRAMES:
+                return self.capacity
+            latency_s = self._load_latency_ewma_s
+            attempts = self._cache_hits + self._cache_misses
+            hit_rate = 0.0 if attempts == 0 else self._cache_hits / attempts
+
+        if latency_s <= 0.0:
+            return min(self.capacity, DEFAULT_IDLE_PREFETCH_FRAMES)
+        frames_per_burst = max(8, int(round(0.100 / latency_s)))
+        if hit_rate < 0.5:
+            frames_per_burst = max(frames_per_burst, DEFAULT_IDLE_PREFETCH_FRAMES)
+        elif hit_rate > 0.9:
+            frames_per_burst = min(frames_per_burst, DEFAULT_IDLE_PREFETCH_FRAMES // 2)
+        return max(1, min(self.capacity, 128, frames_per_burst))
 
     def _evict_outside(self, keep: set[int]) -> None:
         with self._lock:

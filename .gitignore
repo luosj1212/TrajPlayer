@@ -22,6 +22,7 @@ dist/
 
 # Trajectory data and generated sidecar caches
 *.tpdata/
+*.tpindex/
 *.traj
 *.xtc
 *.trr

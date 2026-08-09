@@ -3,9 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sys
-import threading
 import time
-import traceback
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -20,47 +18,25 @@ except Exception as exc:
     report_numpy_import_error(exc)
     raise SystemExit(1) from None
 
-from PySide6.QtCore import QEvent, QSize, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QSurfaceFormat
+from PySide6.QtCore import QEvent, QTimer, Qt, Signal
+from PySide6.QtGui import QSurfaceFormat
 from PySide6.QtWidgets import (
     QApplication,
-    QButtonGroup,
-    QCheckBox,
-    QComboBox,
     QFileDialog,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
     QMessageBox,
-    QPushButton,
-    QProgressBar,
-    QSizePolicy,
-    QSlider,
-    QStatusBar,
-    QStyle,
-    QToolButton,
-    QVBoxLayout,
-    QWidget,
 )
 
-from trajplayer.ase_cache import ConversionCancelled, build_cache_from_source, open_valid_cache
 from trajplayer.benchmark_stats import BenchmarkDiagnostics
 from trajplayer.benchmark_store import create_synthetic_store
 from trajplayer.binary_store import BinaryTrajectoryStore
-from trajplayer.bonds import connected_components, infer_bonds
 from trajplayer.cli_args import CliArgs, parse_cli_args
+from trajplayer.commands import WindowCommands
 from trajplayer.diagnostics import diagnostics_json, probe_opengl
 from trajplayer.gl_view import MoleculeGLWidget, default_surface_format
 from trajplayer.gui_smoke import GuiSmokeController
+from trajplayer.frame_store import FrameStore
 from trajplayer.playback import PlaybackEngine
 from trajplayer.present_queue import FramePresentQueue
-from trajplayer.random_access_cache import (
-    open_random_access_session,
-    supports_random_access_source,
-    write_reader_frame,
-)
 from trajplayer.scrubbing import SliderScrubState
 from trajplayer.selection import (
     ChainSelectionError,
@@ -69,215 +45,17 @@ from trajplayer.selection import (
 )
 from trajplayer.streaming import FrameStreamer
 from trajplayer.topology import BondSource, BondTopology, empty_topology
+from trajplayer.ui import MainWindowView
 from trajplayer.trajectory_source import (
     TrajectorySelectionError,
     TrajectorySource,
     paths_are_supported_for_drop,
     resolve_trajectory_source,
 )
-
-
-APP_STYLESHEET = """
-QMainWindow, QWidget#centralWidget {
-    background: #f4f6f8;
-    color: #20242a;
-    font-size: 10pt;
-}
-QFrame#topBar {
-    background: #ffffff;
-    border-bottom: 1px solid #dfe3e8;
-}
-QFrame#transportBar {
-    background: #ffffff;
-    border-top: 1px solid #dfe3e8;
-}
-QLabel#fileLabel {
-    color: #20242a;
-    font-size: 10pt;
-    font-weight: 600;
-}
-QLabel#infoLabel, QLabel#fpsLabel {
-    color: #68717d;
-    font-size: 9pt;
-}
-QLabel#frameLabel {
-    color: #303740;
-    font-family: "Consolas";
-    font-size: 9pt;
-}
-QLabel#controlLabel {
-    color: #59636f;
-    font-size: 9pt;
-}
-QLabel#sizeValueLabel {
-    color: #303740;
-    font-family: "Consolas";
-    font-size: 9pt;
-}
-QPushButton, QToolButton {
-    min-height: 30px;
-    border: 1px solid #cdd3da;
-    border-radius: 4px;
-    background: #ffffff;
-    color: #20242a;
-    padding: 0 10px;
-}
-QPushButton:hover, QToolButton:hover {
-    border-color: #8aa8c7;
-    background: #eef4fa;
-}
-QPushButton:pressed, QToolButton:pressed {
-    background: #dfeaf5;
-}
-QPushButton:disabled, QToolButton:disabled {
-    color: #9ca3ab;
-    border-color: #e3e6ea;
-    background: #f7f8f9;
-}
-QPushButton#openButton {
-    background: #1769aa;
-    border-color: #1769aa;
-    color: #ffffff;
-    font-weight: 600;
-}
-QPushButton#openButton:hover {
-    background: #125b94;
-    border-color: #125b94;
-}
-QToolButton#playButton {
-    min-width: 38px;
-    min-height: 38px;
-    background: #1769aa;
-    border-color: #1769aa;
-}
-QToolButton#playButton:hover {
-    background: #125b94;
-    border-color: #125b94;
-}
-QCheckBox {
-    color: #38414b;
-    spacing: 6px;
-}
-QCheckBox::indicator {
-    width: 15px;
-    height: 15px;
-}
-QComboBox {
-    min-height: 30px;
-    border: 1px solid #cdd3da;
-    border-radius: 4px;
-    background: #ffffff;
-    color: #20242a;
-    padding: 0 7px;
-}
-QComboBox:hover {
-    border-color: #8aa8c7;
-}
-QComboBox:disabled {
-    color: #9ca3ab;
-    border-color: #e3e6ea;
-    background: #f7f8f9;
-}
-QLineEdit#chainSelectionEdit {
-    min-height: 30px;
-    border: 1px solid #cdd3da;
-    border-radius: 4px;
-    background: #ffffff;
-    color: #20242a;
-    padding: 0 8px;
-    selection-background-color: #1769aa;
-    selection-color: #ffffff;
-}
-QLineEdit#chainSelectionEdit:hover, QLineEdit#chainSelectionEdit:focus {
-    border-color: #6f9bc5;
-}
-QLineEdit#chainSelectionEdit[invalid="true"] {
-    border-color: #c43d4b;
-    background: #fff7f8;
-}
-QFrame#filterModeSegment {
-    min-height: 30px;
-    max-height: 30px;
-    border: 1px solid #cdd3da;
-    border-radius: 4px;
-    background: #edf1f5;
-}
-QToolButton#filterModeButton {
-    min-height: 28px;
-    max-height: 28px;
-    border: 0;
-    border-radius: 3px;
-    background: transparent;
-    color: #4f5965;
-    padding: 0 7px;
-}
-QToolButton#filterModeButton:hover {
-    background: #e2e9f0;
-    color: #20242a;
-}
-QToolButton#filterModeButton:checked {
-    background: #1769aa;
-    color: #ffffff;
-    font-weight: 600;
-}
-QToolButton#filterModeButton:disabled {
-    background: transparent;
-    color: #a5acb4;
-}
-QLabel#filterValueLabel {
-    color: #303740;
-    font-family: "Consolas";
-    font-size: 9pt;
-}
-QLabel#filterValueLabel:disabled {
-    color: #9ca3ab;
-}
-QSlider::groove:horizontal {
-    height: 4px;
-    border-radius: 2px;
-    background: #d7dce2;
-}
-QSlider::sub-page:horizontal {
-    border-radius: 2px;
-    background: #2b6fae;
-}
-QSlider::handle:horizontal {
-    width: 14px;
-    height: 14px;
-    margin: -5px 0;
-    border: 2px solid #2b6fae;
-    border-radius: 7px;
-    background: #ffffff;
-}
-QSlider:disabled::handle:horizontal {
-    border-color: #aeb5bd;
-}
-QSlider#sizeSlider::groove:horizontal {
-    height: 3px;
-}
-QSlider#sizeSlider::handle:horizontal {
-    width: 12px;
-    height: 12px;
-    margin: -5px 0;
-    border-width: 1px;
-    border-radius: 6px;
-}
-QProgressBar {
-    min-height: 3px;
-    max-height: 3px;
-    border: 0;
-    background: #e6e9ed;
-}
-QProgressBar::chunk {
-    background: #2f855a;
-}
-QStatusBar {
-    background: #f7f8fa;
-    color: #626b76;
-    border-top: 1px solid #dfe3e8;
-}
-"""
-
+from trajplayer.workers import (
+    BondInferenceThread as WorkerBondInferenceThread,
+    TrajectoryOpenThread as WorkerTrajectoryOpenThread,
+)
 
 class TrajPlayerApplication(QApplication):
     """Capture Finder file-open events before or after the main window exists."""
@@ -314,181 +92,11 @@ class TrajPlayerApplication(QApplication):
         return super().event(event)
 
 
-class TrajectoryOpenThread(QThread):
-    preview_ready = Signal(object, object)
-    loaded = Signal(object, object, bool)
-    failed = Signal(str)
-    progress = Signal(int, int)
-    stage_changed = Signal(str)
-    cache_frame_ready = Signal(int)
-
-    def __init__(self, source: TrajectorySource) -> None:
-        super().__init__()
-        self.source = source
-        self._cancel_event = threading.Event()
-        self._preview_store: BinaryTrajectoryStore | None = None
-        self._request_condition = threading.Condition()
-        self._requested_indices: tuple[int, ...] = ()
-        self._request_serial = 0
-
-    @property
-    def preview_store(self) -> BinaryTrajectoryStore | None:
-        return self._preview_store
-
-    def cancel(self) -> None:
-        self._cancel_event.set()
-        with self._request_condition:
-            self._request_condition.notify_all()
-
-    def request_frames(self, frame_indices: Iterable[int]) -> None:
-        requested = tuple(dict.fromkeys(max(0, int(index)) for index in frame_indices))
-        with self._request_condition:
-            if requested == self._requested_indices:
-                return
-            self._requested_indices = requested
-            self._request_serial += 1
-            self._request_condition.notify_all()
-
-    def run(self) -> None:
-        store: BinaryTrajectoryStore | None = None
-        reader = None
-        last_progress_s = 0.0
-
-        def emit_progress(done: int, total: int) -> None:
-            nonlocal last_progress_s
-            now_s = time.monotonic()
-            if done == 1 or done == total or now_s - last_progress_s >= 0.05:
-                last_progress_s = now_s
-                self.progress.emit(done, total)
-
-        def emit_preview(preview_store: BinaryTrajectoryStore) -> None:
-            self._preview_store = preview_store
-            self.preview_ready.emit(self.source, preview_store)
-
-        try:
-            try:
-                store = open_valid_cache(self.source)
-                from_cache = True
-            except Exception:
-                from_cache = False
-                if supports_random_access_source(self.source):
-                    reader, store = open_random_access_session(
-                        self.source,
-                        status_callback=self.stage_changed.emit,
-                    )
-                    if not store.is_frame_available(0):
-                        write_reader_frame(reader, store, 0)
-                    emit_preview(store)
-                    emit_progress(store.available_frame_count, store.frame_count)
-                    self._fill_random_access_cache(reader, store, emit_progress)
-                    if not self._cancel_event.is_set():
-                        store.mark_complete()
-                else:
-                    store = build_cache_from_source(
-                        self.source,
-                        progress_callback=emit_progress,
-                        preview_callback=emit_preview,
-                        cancel_event=self._cancel_event,
-                    )
-            if self._cancel_event.is_set():
-                if store is not None and self._preview_store is None:
-                    store.close()
-                return
-            self.loaded.emit(self.source, store, from_cache)
-        except ConversionCancelled:
-            if store is not None and self._preview_store is None:
-                store.close()
-        except Exception as exc:
-            failed_store = store if store is not None else self._preview_store
-            if failed_store is not None and self._preview_store is None:
-                failed_store.close()
-            traceback.print_exc()
-            self.failed.emit(f"Failed to open trajectory:\n{exc}")
-        finally:
-            if reader is not None:
-                reader.close()
-
-    def _fill_random_access_cache(
-        self,
-        reader,
-        store: BinaryTrajectoryStore,
-        progress_callback,
-    ) -> None:
-        while (
-            not self._cancel_event.is_set()
-            and store.available_frame_count < store.frame_count
-        ):
-            with self._request_condition:
-                frame_index: int | None = None
-                while not self._cancel_event.is_set() and frame_index is None:
-                    frame_index = next(
-                        (
-                            index
-                            for index in self._requested_indices
-                            if index < store.frame_count
-                            and not store.is_frame_available(index)
-                        ),
-                        None,
-                    )
-                    if frame_index is None:
-                        self._request_condition.wait()
-                if self._cancel_event.is_set():
-                    return
-
-            write_reader_frame(reader, store, frame_index)
-            self.cache_frame_ready.emit(frame_index)
-            progress_callback(store.available_frame_count, store.frame_count)
+TrajectoryOpenThread = WorkerTrajectoryOpenThread
+BondInferenceThread = WorkerBondInferenceThread
 
 
-class BondInferenceThread(QThread):
-    ready = Signal(int, object, float)
-    failed = Signal(int, str)
-
-    def __init__(
-        self,
-        generation: int,
-        positions: np.ndarray,
-        atom_numbers: np.ndarray,
-        cell: np.ndarray | None,
-    ) -> None:
-        super().__init__()
-        self.generation = int(generation)
-        self.positions = np.ascontiguousarray(positions, dtype=np.float32)
-        self.atom_numbers = np.ascontiguousarray(atom_numbers, dtype=np.uint16)
-        self.cell = None if cell is None else np.ascontiguousarray(cell, dtype=np.float32)
-
-    def run(self) -> None:
-        start = time.perf_counter()
-        try:
-            bonds = infer_bonds(
-                self.positions,
-                self.atom_numbers,
-                cell=self.cell,
-                cancelled=lambda: self.isInterruptionRequested(),
-            )
-            if self.isInterruptionRequested():
-                return
-            component_ids, component_sizes = connected_components(len(self.atom_numbers), bonds)
-            if self.isInterruptionRequested():
-                return
-            topology = BondTopology(
-                bonds=bonds,
-                component_ids=component_ids,
-                component_sizes=component_sizes,
-                source=BondSource.INFERRED_STATIC,
-                source_frame=0,
-            )
-            self.ready.emit(
-                self.generation,
-                topology,
-                (time.perf_counter() - start) * 1000.0,
-            )
-        except Exception as exc:
-            traceback.print_exc()
-            self.failed.emit(self.generation, f"Failed to infer bonds: {exc}")
-
-
-class TrajPlayerWindow(QMainWindow):
+class TrajPlayerWindow(MainWindowView):
     stream_frame_ready = Signal(int)
     stream_failed = Signal(object, str)
     error_reported = Signal(str)
@@ -500,21 +108,17 @@ class TrajPlayerWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("TrajPlayer GPU")
-        self.resize(1280, 820)
-        self.setAcceptDrops(True)
-        self.setStyleSheet(APP_STYLESHEET)
-
-        self.store: BinaryTrajectoryStore | None = None
+        self.store: FrameStore | None = None
         self.streamer: FrameStreamer | None = None
         self.open_thread: TrajectoryOpenThread | None = None
         self._pending_open_source: TrajectorySource | None = None
         self._retired_open_stores: dict[
-            TrajectoryOpenThread, BinaryTrajectoryStore | None
+            TrajectoryOpenThread, FrameStore | None
         ] = {}
-        self._retired_streamers: dict[FrameStreamer, BinaryTrajectoryStore] = {}
+        self._retired_streamers: dict[FrameStreamer, FrameStore] = {}
         self.cache_build_in_progress = False
         self.bond_thread: BondInferenceThread | None = None
+        self.bond_inference_pending = False
         self._retired_bond_threads: set[BondInferenceThread] = set()
         self.playback: PlaybackEngine | None = None
         self.present_queue = FramePresentQueue()
@@ -552,301 +156,18 @@ class TrajPlayerWindow(QMainWindow):
         self.retired_streamer_timer.setInterval(50)
         self.retired_streamer_timer.timeout.connect(self.reap_retired_streamers)
 
-        self.open_button = QPushButton("Open")
-        self.open_button.setObjectName("openButton")
-        self.open_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton))
-        self.open_button.setIconSize(QSize(17, 17))
-        self.open_button.setToolTip("Open trajectory (Ctrl+O)")
-        self.open_button.clicked.connect(self.open_file)
-
-        self.prev_button = QToolButton()
-        self.prev_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward))
-        self.prev_button.setIconSize(QSize(18, 18))
-        self.prev_button.setToolTip("Previous frame (Left)")
-        self.prev_button.setAccessibleName("Previous frame")
-        self.prev_button.clicked.connect(self.step_prev)
-        self.prev_button.setEnabled(False)
-
-        self._play_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
-        self._pause_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause)
-        self.play_button = QToolButton()
-        self.play_button.setObjectName("playButton")
-        self.play_button.setIconSize(QSize(20, 20))
-        self.play_button.setAccessibleName("Play trajectory")
-        self.play_button.clicked.connect(self.toggle_playback)
-        self.play_button.setEnabled(False)
-        self.set_play_button_state(False)
-
-        self.next_button = QToolButton()
-        self.next_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward))
-        self.next_button.setIconSize(QSize(18, 18))
-        self.next_button.setToolTip("Next frame (Right)")
-        self.next_button.setAccessibleName("Next frame")
-        self.next_button.clicked.connect(self.step_next)
-        self.next_button.setEnabled(False)
-
-        self.reset_view_button = QToolButton()
-        self.reset_view_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-        self.reset_view_button.setIconSize(QSize(17, 17))
-        self.reset_view_button.setToolTip("Reset view (R)")
-        self.reset_view_button.setAccessibleName("Reset view")
-        self.reset_view_button.clicked.connect(self.reset_view)
-        self.reset_view_button.setEnabled(False)
-
-        self.loop_check = QCheckBox("Loop")
-        self.loop_check.setChecked(True)
-
-        self.box_check = QCheckBox("Box")
-        self.box_check.setChecked(True)
-        self.box_check.setEnabled(False)
-        self.box_check.toggled.connect(self.on_box_toggled)
-
-        self.infer_bonds_check = QCheckBox("Infer bonds")
-        self.infer_bonds_check.setChecked(True)
-        self.infer_bonds_check.setEnabled(False)
-        self.infer_bonds_check.setToolTip(
-            "Infer a static bond topology from frame 1 when no file topology is available"
+        self.setup_ui(self.gl_view)
+        self.commands = WindowCommands(
+            self,
+            open_file=self.open_file,
+            toggle_playback=self.toggle_playback,
+            step_previous=self.step_prev,
+            step_next=self.step_next,
+            jump_first=self.jump_first,
+            jump_last=self.jump_last,
+            reset_camera=self.reset_view,
         )
-        self.infer_bonds_check.setAccessibleName("Infer bonds from frame 1")
-        self.infer_bonds_check.toggled.connect(self.on_infer_bonds_toggled)
-
-        self.playback_speed_label = QLabel("Speed")
-        self.playback_speed_label.setObjectName("controlLabel")
-        self.playback_speed_label.setEnabled(False)
-        self.playback_speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self.playback_speed_slider.setObjectName("sizeSlider")
-        self.playback_speed_slider.setRange(1, int(self.TARGET_FPS))
-        self.playback_speed_slider.setSingleStep(1)
-        self.playback_speed_slider.setPageStep(5)
-        self.playback_speed_slider.setValue(int(self.TARGET_FPS))
-        self.playback_speed_slider.setFixedWidth(96)
-        self.playback_speed_slider.setToolTip("Playback speed")
-        self.playback_speed_slider.setEnabled(False)
-        self.playback_speed_slider.valueChanged.connect(self.on_playback_speed_changed)
-        self.playback_speed_value_label = QLabel(f"{int(self.TARGET_FPS)} FPS")
-        self.playback_speed_value_label.setObjectName("sizeValueLabel")
-        self.playback_speed_value_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.playback_speed_value_label.setFixedWidth(48)
-        self.playback_speed_value_label.setEnabled(False)
-
-        self.render_mode_combo = QComboBox()
-        self.render_mode_combo.addItem("Ball-stick", "ball_stick")
-        self.render_mode_combo.addItem("Ball", "ball")
-        self.render_mode_combo.addItem("Bond", "bond")
-        self.render_mode_combo.setFixedWidth(112)
-        self.render_mode_combo.setToolTip("Molecular representation")
-        self.render_mode_combo.setEnabled(False)
-        self.render_mode_combo.currentIndexChanged.connect(self.on_render_mode_changed)
-
-        self.atom_size_label = QLabel("Atom")
-        self.atom_size_label.setObjectName("controlLabel")
-        self.atom_size_label.setEnabled(False)
-        self.atom_size_slider = QSlider(Qt.Orientation.Horizontal)
-        self.atom_size_slider.setObjectName("sizeSlider")
-        self.atom_size_slider.setRange(10, 250)
-        self.atom_size_slider.setSingleStep(5)
-        self.atom_size_slider.setPageStep(25)
-        self.atom_size_slider.setValue(100)
-        self.atom_size_slider.setFixedWidth(96)
-        self.atom_size_slider.setToolTip(
-            "Atom radius: 100% is Chimera ball scale in Ball-stick, physical VDW radius in Ball"
-        )
-        self.atom_size_slider.setEnabled(False)
-        self.atom_size_slider.valueChanged.connect(self.on_atom_size_changed)
-        self.atom_size_value_label = QLabel("100%")
-        self.atom_size_value_label.setObjectName("sizeValueLabel")
-        self.atom_size_value_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.atom_size_value_label.setFixedWidth(40)
-        self.atom_size_value_label.setEnabled(False)
-
-        self.bond_size_label = QLabel("Bond")
-        self.bond_size_label.setObjectName("controlLabel")
-        self.bond_size_label.setEnabled(False)
-        self.bond_size_slider = QSlider(Qt.Orientation.Horizontal)
-        self.bond_size_slider.setObjectName("sizeSlider")
-        self.bond_size_slider.setRange(10, 300)
-        self.bond_size_slider.setSingleStep(5)
-        self.bond_size_slider.setPageStep(25)
-        self.bond_size_slider.setValue(100)
-        self.bond_size_slider.setFixedWidth(96)
-        self.bond_size_slider.setToolTip("Bond radius: 100% is 0.20 angstrom")
-        self.bond_size_slider.setEnabled(False)
-        self.bond_size_slider.valueChanged.connect(self.on_bond_size_changed)
-        self.bond_size_value_label = QLabel("100%")
-        self.bond_size_value_label.setObjectName("sizeValueLabel")
-        self.bond_size_value_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.bond_size_value_label.setFixedWidth(40)
-        self.bond_size_value_label.setEnabled(False)
-
-        self.filter_mode_segment = QFrame()
-        self.filter_mode_segment.setObjectName("filterModeSegment")
-        filter_mode_layout = QHBoxLayout(self.filter_mode_segment)
-        filter_mode_layout.setContentsMargins(1, 1, 1, 1)
-        filter_mode_layout.setSpacing(0)
-        self.filter_mode_group = QButtonGroup(self)
-        self.filter_mode_group.setExclusive(True)
-        self.filter_mode_buttons: dict[str, QToolButton] = {}
-        for label, mode, width in (("All", "all", 38), ("Chain", "chain", 52), ("Atom", "atom", 46)):
-            button = QToolButton()
-            button.setObjectName("filterModeButton")
-            button.setText(label)
-            button.setCheckable(True)
-            button.setFixedWidth(width)
-            button.setEnabled(False)
-            button.setToolTip(f"Show {label.lower() if mode != 'all' else 'all atoms'}")
-            button.setAccessibleName(f"Show {label.lower()}")
-            button.clicked.connect(
-                lambda _checked=False, selected_mode=mode: self.on_filter_mode_changed(selected_mode)
-            )
-            self.filter_mode_group.addButton(button)
-            self.filter_mode_buttons[mode] = button
-            filter_mode_layout.addWidget(button)
-        self.filter_mode_buttons["all"].setChecked(True)
-
-        self.filter_value_slider = QSlider(Qt.Orientation.Horizontal)
-        self.filter_value_slider.setObjectName("filterValueSlider")
-        self.filter_value_slider.setRange(1, 1)
-        self.filter_value_slider.setSingleStep(1)
-        self.filter_value_slider.setPageStep(1)
-        self.filter_value_slider.setValue(1)
-        self.filter_value_slider.setFixedWidth(92)
-        self.filter_value_slider.setToolTip("All atoms are visible")
-        self.filter_value_slider.setEnabled(False)
-        self.filter_value_slider.valueChanged.connect(self.on_filter_value_changed)
-        self.filter_value_label = QLabel("All atoms")
-        self.filter_value_label.setObjectName("filterValueLabel")
-        self.filter_value_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.filter_value_label.setFixedWidth(76)
-        self.filter_value_label.setEnabled(False)
-
-        self.chain_selection_edit = QLineEdit("1")
-        self.chain_selection_edit.setObjectName("chainSelectionEdit")
-        self.chain_selection_edit.setPlaceholderText("1,3-5")
-        self.chain_selection_edit.setFixedWidth(124)
-        self.chain_selection_edit.setMaxLength(512)
-        self.chain_selection_edit.setToolTip(
-            "Enter chain numbers separated by commas; use a dash for ranges"
-        )
-        self.chain_selection_edit.setAccessibleName("Visible chain numbers")
-        self.chain_selection_edit.setProperty("invalid", False)
-        self.chain_selection_edit.setEnabled(False)
-        self.chain_selection_edit.hide()
-        self.chain_selection_edit.textChanged.connect(
-            self.on_chain_selection_changed
-        )
-        self.chain_selection_edit.editingFinished.connect(
-            self.normalize_chain_selection
-        )
-
-        self.frame_label = QLabel("Frame 0 / 0")
-        self.frame_label.setObjectName("frameLabel")
-        self.frame_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.frame_label.setMinimumWidth(150)
-        self.file_label = QLabel("Drop a trajectory here or click Open")
-        self.file_label.setObjectName("fileLabel")
-        self.file_label.setMinimumWidth(0)
-        self.file_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.info_label = QLabel("GPU instancing idle")
-        self.info_label.setObjectName("infoLabel")
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 1)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.hide()
-
-        self.frame_slider = QSlider(Qt.Orientation.Horizontal)
-        self.frame_slider.setMinimum(0)
-        self.frame_slider.setMaximum(0)
-        self.frame_slider.setEnabled(False)
-        self.frame_slider.setTracking(False)
-        self.frame_slider.sliderPressed.connect(self.on_frame_slider_pressed)
-        self.frame_slider.sliderMoved.connect(self.on_frame_slider_moved)
-        self.frame_slider.sliderReleased.connect(self.on_frame_slider_released)
-        self.frame_slider.valueChanged.connect(self.on_frame_slider_changed)
-
-        top_bar = QFrame()
-        top_bar.setObjectName("topBar")
-        top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(12, 8, 12, 8)
-        top_layout.setSpacing(12)
-        top_layout.addWidget(self.open_button)
-        file_layout = QVBoxLayout()
-        file_layout.setContentsMargins(0, 0, 0, 0)
-        file_layout.setSpacing(1)
-        file_layout.addWidget(self.file_label)
-        file_layout.addWidget(self.info_label)
-        top_layout.addLayout(file_layout, stretch=1)
-
-        transport_bar = QFrame()
-        transport_bar.setObjectName("transportBar")
-        transport_layout = QVBoxLayout(transport_bar)
-        transport_layout.setContentsMargins(12, 9, 12, 10)
-        transport_layout.setSpacing(8)
-        transport_layout.addWidget(self.frame_slider)
-
-        controls = QHBoxLayout()
-        controls.setSpacing(6)
-        controls.addWidget(self.prev_button)
-        controls.addWidget(self.play_button)
-        controls.addWidget(self.next_button)
-        controls.addSpacing(6)
-        controls.addWidget(self.reset_view_button)
-        controls.addSpacing(10)
-        controls.addWidget(self.loop_check)
-        controls.addWidget(self.box_check)
-        controls.addWidget(self.infer_bonds_check)
-        controls.addStretch(1)
-        controls.addWidget(self.filter_mode_segment)
-        controls.addSpacing(4)
-        controls.addWidget(self.filter_value_slider)
-        controls.addWidget(self.filter_value_label)
-        controls.addWidget(self.chain_selection_edit)
-        transport_layout.addLayout(controls)
-
-        display_controls = QHBoxLayout()
-        display_controls.setSpacing(6)
-        display_controls.addWidget(self.render_mode_combo)
-        display_controls.addSpacing(8)
-        display_controls.addWidget(self.atom_size_label)
-        display_controls.addWidget(self.atom_size_slider)
-        display_controls.addWidget(self.atom_size_value_label)
-        display_controls.addSpacing(8)
-        display_controls.addWidget(self.bond_size_label)
-        display_controls.addWidget(self.bond_size_slider)
-        display_controls.addWidget(self.bond_size_value_label)
-        display_controls.addStretch(1)
-        display_controls.addWidget(self.playback_speed_label)
-        display_controls.addWidget(self.playback_speed_slider)
-        display_controls.addWidget(self.playback_speed_value_label)
-        display_controls.addSpacing(8)
-        display_controls.addWidget(self.frame_label)
-        transport_layout.addLayout(display_controls)
-
-        layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(top_bar)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(self.gl_view, stretch=1)
-        layout.addWidget(transport_bar)
-
-        central = QWidget()
-        central.setObjectName("centralWidget")
-        central.setLayout(layout)
-        self.setCentralWidget(central)
-
-        self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Ready")
+        self.commands.bind_buttons(self)
 
         self.render_timer = QTimer(self)
         self.render_timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -870,20 +191,6 @@ class TrajPlayerWindow(QMainWindow):
         self.external_open_timer.setSingleShot(True)
         self.external_open_timer.setInterval(120)
         self.external_open_timer.timeout.connect(self.open_queued_external_paths)
-
-        self._shortcuts: list[QShortcut] = []
-        for key, slot in (
-            (QKeySequence(Qt.Key.Key_Space), self.toggle_playback),
-            (QKeySequence(Qt.Key.Key_Left), self.step_prev),
-            (QKeySequence(Qt.Key.Key_Right), self.step_next),
-            (QKeySequence(Qt.Key.Key_Home), self.jump_first),
-            (QKeySequence(Qt.Key.Key_End), self.jump_last),
-            (QKeySequence("R"), self.reset_view),
-            (QKeySequence.StandardKey.Open, self.open_file),
-        ):
-            shortcut = QShortcut(key, self)
-            shortcut.activated.connect(slot)
-            self._shortcuts.append(shortcut)
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
@@ -952,8 +259,12 @@ class TrajPlayerWindow(QMainWindow):
         thread.stage_changed.connect(
             lambda message, worker=thread: self.on_open_stage_changed(worker, message)
         )
-        thread.cache_frame_ready.connect(
-            lambda frame_index, worker=thread: self.on_cache_frame_ready(worker, frame_index)
+        thread.index_progress.connect(
+            lambda count, complete, worker=thread: self.on_index_progress(
+                worker,
+                count,
+                complete,
+            )
         )
         thread.preview_ready.connect(
             lambda opened_source, store, worker=thread: self.on_trajectory_preview(
@@ -1012,22 +323,33 @@ class TrajPlayerWindow(QMainWindow):
                 f"Converting to contiguous float32 cache: {done}/{total} frames"
             )
 
-    def on_cache_frame_ready(
+    def on_index_progress(
         self,
         thread: TrajectoryOpenThread,
-        frame_index: int,
+        frame_count: int,
+        complete: bool,
     ) -> None:
-        if thread is not self.open_thread or self.streamer is None:
+        if thread is not self.open_thread or self.store is None:
             return
-        self.streamer.notify_store_updated()
-        if int(frame_index) == self.current_frame:
-            self.request_stream_frame(self.current_frame, interactive=self.slider_scrub.active)
+        if self.streamer is not None:
+            self.streamer.notify_store_updated()
+        self.update_available_controls()
+        self.update_trajectory_info()
+        self.update_frame_label()
+        if complete:
+            self.status_bar.showMessage(
+                f"Indexed {frame_count} frames; direct trajectory reading is ready"
+            )
+        else:
+            self.status_bar.showMessage(
+                f"First frame ready; background index has found {frame_count} frames"
+            )
 
     def on_trajectory_preview(
         self,
         thread: TrajectoryOpenThread,
         source: TrajectorySource,
-        store: BinaryTrajectoryStore,
+        store: FrameStore,
     ) -> None:
         if thread is not self.open_thread:
             return
@@ -1046,7 +368,7 @@ class TrajPlayerWindow(QMainWindow):
         self,
         thread: TrajectoryOpenThread,
         source: TrajectorySource,
-        store: BinaryTrajectoryStore,
+        store: FrameStore,
         from_cache: bool,
     ) -> None:
         if thread is not self.open_thread:
@@ -1057,7 +379,7 @@ class TrajPlayerWindow(QMainWindow):
     def finish_trajectory_load(
         self,
         source: TrajectorySource,
-        store: BinaryTrajectoryStore,
+        store: FrameStore,
         *,
         from_cache: bool,
     ) -> None:
@@ -1071,12 +393,15 @@ class TrajPlayerWindow(QMainWindow):
         self.internal_slider_change = False
         self.frame_slider.setEnabled(store.frame_count > 1)
         self.progress_bar.hide()
-        source_label = "cache" if from_cache else "new binary cache"
+        if bool(store.metadata.get("direct_reader")):
+            source_label = "direct reader"
+        else:
+            source_label = "cache" if from_cache else "new binary cache"
         self.update_trajectory_info()
         self.status_bar.showMessage(f"Loaded {source.display_name} from {source_label}")
         self.open_button.setEnabled(True)
         self.set_controls_enabled(store.frame_count > 1)
-        self.reset_view_button.setEnabled(True)
+        self.commands.set_reset_enabled(True)
         self.update_frame_label()
 
     def on_open_thread_finished(self, thread: TrajectoryOpenThread) -> None:
@@ -1101,7 +426,7 @@ class TrajPlayerWindow(QMainWindow):
     def activate_trajectory(
         self,
         source: TrajectorySource,
-        store: BinaryTrajectoryStore,
+        store: FrameStore,
     ) -> None:
         self.present_queue.clear()
         self.store = store
@@ -1152,7 +477,7 @@ class TrajPlayerWindow(QMainWindow):
         self.file_label.setToolTip(source.tooltip)
         self.update_trajectory_info()
         self.set_controls_enabled(store.navigable_frame_count > 1)
-        self.reset_view_button.setEnabled(True)
+        self.commands.set_reset_enabled(True)
         self.update_frame_label()
 
     def update_available_controls(self) -> None:
@@ -1234,11 +559,18 @@ class TrajPlayerWindow(QMainWindow):
                 f", {self.streamer.capacity}-frame/{cache_mib:.0f} MiB "
                 f"{budget_mode} cache"
             )
-        disk_cache_text = (
-            f"{self.store.available_frame_count}/{self.store.frame_count} frames cached on demand"
-            if self.store.supports_random_access and not self.store.is_complete
-            else f"{self.store.available_frame_count}/{self.store.frame_count} frames on disk"
-        )
+        if bool(self.store.metadata.get("direct_reader")):
+            disk_cache_text = (
+                "direct source"
+                if self.store.frame_count_is_final
+                else f"direct source, indexing ({self.store.frame_count}+ frames found)"
+            )
+        else:
+            disk_cache_text = (
+                f"{self.store.available_frame_count}/{self.store.frame_count} frames cached on demand"
+                if self.store.supports_random_access and not self.store.is_complete
+                else f"{self.store.available_frame_count}/{self.store.frame_count} frames on disk"
+            )
         self.info_label.setText(
             f"{self.store.frame_count} frames, {self.store.atom_count} atoms{bond_text}, "
             f"directional prefetch{cache_text}, "
@@ -1410,7 +742,7 @@ class TrajPlayerWindow(QMainWindow):
         )
         self.status_bar.showMessage(message)
 
-    def start_bond_inference(self, store: BinaryTrajectoryStore) -> None:
+    def start_bond_inference(self, store: FrameStore) -> None:
         self.stop_bond_inference(wait_ms=0)
         self.trajectory_generation += 1
         self.gl_view.set_bonds(np.empty((0, 2), dtype=np.int32))
@@ -1429,16 +761,40 @@ class TrajPlayerWindow(QMainWindow):
         self.component_sizes = self.bond_topology.component_sizes
         self.filter_mode_buttons["chain"].setEnabled(False)
         self.update_trajectory_info()
+        self.bond_inference_pending = True
+        self.try_start_bond_inference()
 
-        first_frame = np.ascontiguousarray(store.frame(0), dtype=np.float32)
-        atom_numbers = np.ascontiguousarray(store.atom_numbers, dtype=np.uint16)
-        cell = store.cell(0)
-        thread = BondInferenceThread(
-            self.trajectory_generation,
-            first_frame,
-            atom_numbers,
-            cell,
+    def try_start_bond_inference(self) -> None:
+        if (
+            not self.bond_inference_pending
+            or self.bond_thread is not None
+            or self.store is None
+            or self.streamer is None
+        ):
+            return
+        lease = self.streamer.acquire_frame(0)
+        if lease is None:
+            self.request_stream_frame(0)
+            return
+        self.bond_inference_pending = False
+        atom_numbers = np.array(
+            self.store.atom_numbers,
+            dtype=np.uint16,
+            copy=True,
+            order="C",
         )
+        try:
+            thread = BondInferenceThread(
+                self.trajectory_generation,
+                lease.positions,
+                atom_numbers,
+                lease.cell,
+                release_callback=lease.release,
+            )
+        except Exception:
+            lease.release()
+            self.bond_inference_pending = True
+            raise
         thread.ready.connect(self.on_bonds_ready)
         thread.failed.connect(self.on_bonds_failed)
         thread.finished.connect(lambda thread=thread: self.on_bond_thread_finished(thread))
@@ -1447,6 +803,7 @@ class TrajPlayerWindow(QMainWindow):
         thread.start()
 
     def stop_bond_inference(self, *, wait_ms: int) -> None:
+        self.bond_inference_pending = False
         thread = self.bond_thread
         self.bond_thread = None
         if thread is not None and thread.isRunning():
@@ -1566,6 +923,9 @@ class TrajPlayerWindow(QMainWindow):
         self.benchmark_warmup_timer.stop()
         stats = self.gl_view.render_stats
         render_summary = stats.summary() if stats is not None else {}
+        streamer_stats = (
+            self.streamer.stats_snapshot() if self.streamer is not None else None
+        )
         elapsed_s = max(0.0, time.perf_counter() - self.benchmark_started_s)
         frames = int(render_summary.get("frames", 0))
         result = {
@@ -1580,6 +940,18 @@ class TrajPlayerWindow(QMainWindow):
             "streamer_memory_bytes": self.streamer.memory_bytes if self.streamer is not None else 0,
             "streamer_budget_bytes": self.streamer.max_memory_bytes if self.streamer is not None else 0,
             "streamer_budget_mode": self.streamer.memory_budget.mode if self.streamer is not None else "none",
+            "streamer_io": {}
+            if streamer_stats is None
+            else {
+                "loads": streamer_stats.loads,
+                "cache_hits": streamer_stats.cache_hits,
+                "cache_misses": streamer_stats.cache_misses,
+                "cache_hit_rate": streamer_stats.cache_hit_rate,
+                "load_latency_ms": streamer_stats.load_latency_ms,
+                "decoded_megabytes": streamer_stats.decoded_megabytes,
+                "decode_megabytes_per_second": streamer_stats.decode_megabytes_per_second,
+                "effective_prefetch_frames": streamer_stats.effective_prefetch_frames,
+            },
             "conservative_depth": self.gl_view.conservative_depth_enabled,
             "opengl": self.gl_view.gl_diagnostics,
         }
@@ -1604,7 +976,7 @@ class TrajPlayerWindow(QMainWindow):
 
     def close_current_trajectory(self) -> None:
         thread = self.open_thread
-        deferred_store: BinaryTrajectoryStore | None = None
+        deferred_store: FrameStore | None = None
         if thread is not None and thread.isRunning():
             thread.cancel()
             if self.store is not None and self.store is thread.preview_store:
@@ -1665,6 +1037,8 @@ class TrajPlayerWindow(QMainWindow):
         self.slider_scrub.release(0)
         self.frame_slider.setMaximum(0)
         self.frame_slider.setValue(0)
+        self.set_controls_enabled(False)
+        self.commands.set_reset_enabled(False)
 
     def reap_retired_streamers(self) -> None:
         for streamer, store in tuple(self._retired_streamers.items()):
@@ -1678,9 +1052,7 @@ class TrajPlayerWindow(QMainWindow):
             self.retired_streamer_timer.stop()
 
     def set_controls_enabled(self, enabled: bool) -> None:
-        self.prev_button.setEnabled(enabled)
-        self.play_button.setEnabled(enabled)
-        self.next_button.setEnabled(enabled)
+        self.commands.set_transport_enabled(enabled)
         self.playback_speed_label.setEnabled(enabled)
         self.playback_speed_slider.setEnabled(enabled)
         self.playback_speed_value_label.setEnabled(enabled)
@@ -1765,6 +1137,8 @@ class TrajPlayerWindow(QMainWindow):
         self.schedule_next_render_tick()
 
     def on_stream_frame_ready(self, frame_index: int) -> None:
+        if int(frame_index) == 0:
+            self.try_start_bond_inference()
         if (
             self.store is None
             or self.streamer is None
@@ -1803,19 +1177,6 @@ class TrajPlayerWindow(QMainWindow):
             self.gl_view.release_frame_reference()
         if self.streamer.has_frame(target) and not self.present_queue.has_pending_frame:
             self.render_timer.start(0)
-        thread = self.open_thread
-        if self.store is not None and thread is not None and thread.isRunning():
-            target_indices = self.streamer.target_indices(
-                target,
-                direction=direction,
-                interactive=interactive,
-            )
-            if any(
-                not self.store.is_frame_available(index)
-                for index in target_indices
-            ):
-                thread.request_frames(target_indices)
-
     def toggle_playback(self) -> None:
         if self.store is None:
             return
@@ -1879,13 +1240,12 @@ class TrajPlayerWindow(QMainWindow):
         self.schedule_next_render_tick()
 
     def set_play_button_state(self, playing: bool) -> None:
+        commands = getattr(self, "commands", None)
+        if commands is not None:
+            commands.set_playing(playing)
         if playing:
-            self.play_button.setIcon(self._pause_icon)
-            self.play_button.setToolTip("Pause (Space)")
             self.play_button.setAccessibleName("Pause trajectory")
         else:
-            self.play_button.setIcon(self._play_icon)
-            self.play_button.setToolTip("Play (Space)")
             self.play_button.setAccessibleName("Play trajectory")
 
     def on_frame_slider_changed(self, value: int) -> None:
@@ -2001,7 +1361,8 @@ class TrajPlayerWindow(QMainWindow):
     def update_frame_label(self) -> None:
         total = self.store.frame_count if self.store is not None else 0
         current = self.current_frame + 1 if total else 0
-        self.frame_label.setText(f"Frame {current} / {total}")
+        suffix = "+" if self.store is not None and not self.store.frame_count_is_final else ""
+        self.frame_label.setText(f"Frame {current} / {total}{suffix}")
 
     def show_error(self, message: str) -> None:
         self.stop_playback()
@@ -2056,6 +1417,18 @@ class TrajPlayerWindow(QMainWindow):
 def main() -> None:
     cli_args = parse_cli_args(sys.argv[1:])
     if cli_args.startup_smoke:
+        return
+    if cli_args.reader_smoke is not None:
+        from trajplayer.reader_smoke import run_reader_smoke, write_reader_smoke_report
+
+        try:
+            report = run_reader_smoke(cli_args.reader_smoke)
+            if cli_args.reader_smoke_output is not None:
+                write_reader_smoke_report(report, cli_args.reader_smoke_output)
+            print(f"[reader-smoke] {json.dumps(report, sort_keys=True)}", flush=True)
+        except Exception as exc:
+            print(f"[reader-smoke] failed: {exc}", flush=True)
+            raise SystemExit(2) from exc
         return
     if cli_args.doctor_output is not None:
         report = diagnostics_json(

@@ -5,6 +5,8 @@ All notable changes to TrajPlayer are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6] - 2026-08-09
+
 ### Changed
 
 - Added leased frame-cache slots so OpenGL uploads use the streamer's contiguous
@@ -15,10 +17,22 @@ All notable changes to TrajPlayer are documented here. The project follows
 - Deferred camera depth sorting until pointer interaction is idle, avoiding
   repeated `O(N log N)` sorts and static VBO uploads while dragging
 - Replaced the fixed 256 MiB RAM cache with a 64-256 MiB adaptive budget that
-  accounts for available memory, frame size, and the renderer/topology working set
-- Changed random-access trajectories to populate sparse decoded sidecars only
-  for requested directional prefetch windows instead of filling every frame in
-  the background
+  accounts for available memory, frame size, renderer/topology working sets,
+  optional writers, decode latency, and cache-hit telemetry
+- Changed ASE `.traj`, XYZ/extXYZ, XTC, and TRR inputs to direct readers; a full
+  decoded sidecar is no longer required or populated in the background
+- Added progressive XYZ/extXYZ indexing so the first frame is available before
+  the complete file-offset scan finishes
+- Replaced the MDAnalysis Gromacs backend with Chemfiles and removed SciPy from
+  bond inference by adding union-find and cell-list implementations
+- Added the optional native `trajcore` extension for neighbor candidates and
+  connected components, with a tested NumPy fallback
+- Added lightweight direct ASE ULM, extXYZ, GRO, PDB, and CIF read paths so
+  portable builds never fall through an `ase.io` import that requires SciPy
+- Added source and packaged all-format reader smoke tests for `.traj`, extXYZ,
+  GRO, PDB, CIF, XTC, and TRR
+- Split Qt view construction, background workers, and QAction commands out of
+  the application controller without changing the visible layout
 - Added dependency-level portable bundle size reporting to release builds
 
 ## [0.1.0-alpha.5] - 2026-08-08
@@ -94,6 +108,7 @@ All notable changes to TrajPlayer are documented here. The project follows
 - Windows x64 and Linux x86_64 portable packaging
 - Cross-platform tests, CI, release automation, and dependency license collection
 
+[0.1.0-alpha.6]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.3

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import io
-import json
-import mmap
+import hashlib
+import os
 import shutil
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
@@ -16,22 +16,26 @@ from .binary_store import (
     cache_dir_for_source,
     prepare_cache_directory,
 )
+from .ase_traj_reader import AseUlmTrajectoryReader
+from .structure_reader import read_structure
 from .trajectory_source import TrajectorySource
+from .xyz_reader import read_xyz_frame
+from .xyz_index import FRAME_OFFSETS_FILE, ProgressiveXyzIndex
 
 
-RANDOM_ACCESS_SUFFIXES = frozenset({".traj", ".xyz", ".extxyz", ".xtc", ".trr"})
-FRAME_OFFSETS_FILE = "frame_offsets.u64"
-FRAME_INDEX_METADATA_FILE = "frame_index.json"
-INDEX_CHUNK_BYTES = 16 * 1024 * 1024
+RANDOM_ACCESS_SUFFIXES = frozenset(
+    {".traj", ".xyz", ".extxyz", ".gro", ".pdb", ".cif", ".xtc", ".trr"}
+)
 
 
-@dataclass(frozen=True)
+@dataclass
 class RandomAccessSummary:
     frame_count: int
     atom_count: int
     atom_numbers: np.ndarray
     symbols: list[str]
     has_cell: bool
+    frame_count_is_final: bool = True
 
 
 class RandomAccessFrameReader(Protocol):
@@ -39,11 +43,169 @@ class RandomAccessFrameReader(Protocol):
 
     def read_frame(self, frame_index: int) -> tuple[np.ndarray, np.ndarray | None]: ...
 
+    def wait_for_index_update(
+        self,
+        previous_count: int,
+        *,
+        timeout_s: float,
+    ) -> tuple[int, bool]: ...
+
     def close(self) -> None: ...
+
+
+class RandomAccessTrajectoryStore:
+    """Direct reader-backed frame source with no mandatory decoded sidecar."""
+
+    def __init__(
+        self,
+        source: TrajectorySource,
+        reader: RandomAccessFrameReader,
+        *,
+        root: Path,
+    ) -> None:
+        self.trajectory_source = source
+        self.reader = reader
+        self.root = root.resolve()
+        self.atom_numbers = np.ascontiguousarray(reader.summary.atom_numbers, dtype=np.uint16)
+        self.metadata: dict[str, object] = {
+            "random_access": True,
+            "direct_reader": True,
+            "persistent_decoded_cache": False,
+            "source_files": [
+                SourceIdentity.from_path(
+                    path,
+                    path.stat().st_mtime_ns,
+                    path.stat().st_size,
+                ).to_json()
+                for path in source.paths
+            ],
+        }
+        self._read_lock = threading.Lock()
+        self._closed = False
+
+    @property
+    def frame_count(self) -> int:
+        return int(self.reader.summary.frame_count)
+
+    @property
+    def frame_count_is_final(self) -> bool:
+        return bool(self.reader.summary.frame_count_is_final)
+
+    @property
+    def atom_count(self) -> int:
+        return int(self.reader.summary.atom_count)
+
+    @property
+    def has_cells(self) -> bool:
+        return bool(self.reader.summary.has_cell)
+
+    @property
+    def supports_random_access(self) -> bool:
+        return True
+
+    @property
+    def is_complete(self) -> bool:
+        return self.frame_count_is_final
+
+    @property
+    def available_frame_count(self) -> int:
+        return self.frame_count
+
+    @property
+    def navigable_frame_count(self) -> int:
+        return self.frame_count
+
+    def is_frame_available(self, frame_index: int) -> bool:
+        return 0 <= int(frame_index) < self.frame_count
+
+    def read_frame_arrays(self, frame_index: int) -> tuple[np.ndarray, np.ndarray | None]:
+        with self._read_lock:
+            positions, cell = self.reader.read_frame(int(frame_index))
+        return (
+            np.ascontiguousarray(positions, dtype=np.float32),
+            None if cell is None else np.ascontiguousarray(cell, dtype=np.float32),
+        )
+
+    def read_frame_into(
+        self,
+        frame_index: int,
+        positions: np.ndarray,
+        cell: np.ndarray | None,
+    ) -> None:
+        source_positions, source_cell = self.read_frame_arrays(frame_index)
+        np.copyto(positions, source_positions)
+        if cell is not None:
+            if source_cell is None:
+                cell.fill(0.0)
+            else:
+                np.copyto(cell, source_cell)
+
+    def frame(self, frame_index: int) -> np.ndarray:
+        positions, _cell = self.read_frame_arrays(frame_index)
+        return positions
+
+    def cell(self, frame_index: int) -> np.ndarray | None:
+        _positions, cell = self.read_frame_arrays(frame_index)
+        return cell
+
+    def wait_for_index_update(
+        self,
+        previous_count: int,
+        *,
+        timeout_s: float,
+    ) -> tuple[int, bool]:
+        return self.reader.wait_for_index_update(
+            int(previous_count),
+            timeout_s=float(timeout_s),
+        )
+
+    def close(self) -> None:
+        with self._read_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self.reader.close()
+
+
+def index_cache_dir_for_source(source_path: Path) -> Path:
+    path = source_path.resolve()
+    adjacent = path.with_name(f"{path.name}.tpindex")
+    try:
+        adjacent.mkdir(parents=True, exist_ok=True)
+        return adjacent
+    except OSError:
+        cache_base = Path(
+            os.environ.get("LOCALAPPDATA")
+            or os.environ.get("XDG_CACHE_HOME")
+            or (Path.home() / ".cache")
+        )
+        digest = hashlib.sha256(os.fsencode(str(path))).hexdigest()[:20]
+        fallback = cache_base / "TrajPlayer" / "indexes" / digest
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 
 
 def supports_random_access_source(source: TrajectorySource) -> bool:
     return source.trajectory_path.suffix.lower() in RANDOM_ACCESS_SUFFIXES
+
+
+def open_direct_random_access_store(
+    source: TrajectorySource,
+    *,
+    status_callback: Callable[[str], None] | None = None,
+    index_progress_callback: Callable[[int, bool], None] | None = None,
+) -> RandomAccessTrajectoryStore:
+    if source.trajectory_path.suffix.lower() in {".xyz", ".extxyz"}:
+        root = index_cache_dir_for_source(source.trajectory_path)
+    else:
+        root = _reader_state_dir_for_source(source.trajectory_path)
+    reader = _open_reader(
+        source,
+        root,
+        status_callback=status_callback,
+        index_progress_callback=index_progress_callback,
+    )
+    return RandomAccessTrajectoryStore(source, reader, root=root)
 
 
 def open_random_access_session(
@@ -59,7 +221,14 @@ def open_random_access_session(
         root, temporary_cache = prepare_cache_directory(canonical_root)
 
     try:
-        reader = _open_reader(source, root, status_callback=status_callback)
+        reader = _open_reader(
+            source,
+            root,
+            status_callback=status_callback,
+            index_progress_callback=None,
+        )
+        while not reader.summary.frame_count_is_final:
+            reader.wait_for_index_update(reader.summary.frame_count, timeout_s=0.05)
     except Exception:
         if store is not None:
             store.close()
@@ -73,7 +242,14 @@ def open_random_access_session(
         reader.close()
         root, temporary_cache = prepare_cache_directory(canonical_root)
         try:
-            reader = _open_reader(source, root, status_callback=status_callback)
+            reader = _open_reader(
+                source,
+                root,
+                status_callback=status_callback,
+                index_progress_callback=None,
+            )
+            while not reader.summary.frame_count_is_final:
+                reader.wait_for_index_update(reader.summary.frame_count, timeout_s=0.05)
         except Exception:
             if temporary_cache:
                 shutil.rmtree(root, ignore_errors=True)
@@ -125,20 +301,26 @@ def write_reader_frame(
 
 class _AseTrajectoryReader:
     def __init__(self, path: Path) -> None:
-        from ase.io.trajectory import Trajectory
-
-        self._trajectory = Trajectory(str(path))
-        frame_count = len(self._trajectory)
-        if frame_count <= 0:
-            self._trajectory.close()
-            raise ValueError("No frames found in trajectory")
-        first = self._trajectory[0]
-        self.summary = _summary_from_atoms(first, frame_count)
+        self._trajectory = AseUlmTrajectoryReader(path)
+        self.summary = RandomAccessSummary(
+            frame_count=self._trajectory.frame_count,
+            atom_count=self._trajectory.atom_count,
+            atom_numbers=self._trajectory.atom_numbers,
+            symbols=list(self._trajectory.symbols),
+            has_cell=self._trajectory.has_cell,
+        )
 
     def read_frame(self, frame_index: int) -> tuple[np.ndarray, np.ndarray | None]:
-        atoms = self._trajectory[int(frame_index)]
-        _validate_atom_layout(atoms, self.summary, int(frame_index))
-        return _arrays_from_atoms(atoms)
+        return self._trajectory.read_frame(int(frame_index))
+
+    def wait_for_index_update(
+        self,
+        previous_count: int,
+        *,
+        timeout_s: float,
+    ) -> tuple[int, bool]:
+        del previous_count, timeout_s
+        return self.summary.frame_count, True
 
     def close(self) -> None:
         self._trajectory.close()
@@ -148,49 +330,35 @@ class _GromacsReader:
     def __init__(self, source: TrajectorySource) -> None:
         if source.topology_path is None:
             raise ValueError("A Gromacs trajectory requires a GRO topology")
-        from ase.io import read
+        from .gromacs_reader import ChemfilesGromacsReader
 
-        try:
-            import MDAnalysis as mda
-        except ImportError as exc:
-            raise RuntimeError(
-                "Gromacs XTC/TRR support requires a complete MDAnalysis installation"
-            ) from exc
-
-        topology_atoms = read(str(source.topology_path), format="gromacs")
-        self._universe = mda.Universe(
-            str(source.topology_path),
-            str(source.trajectory_path),
-            in_memory=False,
+        topology = read_structure(source.topology_path)
+        self._reader = ChemfilesGromacsReader(
+            source.trajectory_path,
+            expected_atom_count=topology.positions.shape[0],
         )
-        frame_count = len(self._universe.trajectory)
-        if frame_count <= 0:
-            self.close()
-            raise ValueError("No frames found in Gromacs trajectory")
-        if len(topology_atoms) != self._universe.atoms.n_atoms:
-            self.close()
-            raise ValueError(
-                f"GRO topology has {len(topology_atoms)} atoms but {source.trajectory_path.name} "
-                f"has {self._universe.atoms.n_atoms} atoms"
-            )
-        first = self._universe.trajectory[0]
         self.summary = RandomAccessSummary(
-            frame_count=frame_count,
-            atom_count=len(topology_atoms),
-            atom_numbers=np.asarray(topology_atoms.get_atomic_numbers(), dtype=np.uint16),
-            symbols=list(topology_atoms.get_chemical_symbols()),
-            has_cell=_cell_from_timestep(first) is not None,
+            frame_count=self._reader.frame_count,
+            atom_count=topology.positions.shape[0],
+            atom_numbers=topology.atom_numbers,
+            symbols=list(topology.symbols),
+            has_cell=self._reader.has_cell,
         )
 
     def read_frame(self, frame_index: int) -> tuple[np.ndarray, np.ndarray | None]:
-        timestep = self._universe.trajectory[int(frame_index)]
-        return (
-            np.ascontiguousarray(timestep.positions, dtype=np.float32),
-            _cell_from_timestep(timestep),
-        )
+        return self._reader.read_frame(int(frame_index))
+
+    def wait_for_index_update(
+        self,
+        previous_count: int,
+        *,
+        timeout_s: float,
+    ) -> tuple[int, bool]:
+        del previous_count, timeout_s
+        return self.summary.frame_count, True
 
     def close(self) -> None:
-        self._universe.trajectory.close()
+        self._reader.close()
 
 
 class _IndexedXyzReader:
@@ -200,75 +368,114 @@ class _IndexedXyzReader:
         cache_root: Path,
         *,
         status_callback: Callable[[str], None] | None,
+        index_progress_callback: Callable[[int, bool], None] | None,
     ) -> None:
         self._path = path.resolve()
         self._file = self._path.open("rb")
-        self._offsets_path = cache_root / FRAME_OFFSETS_FILE
-        metadata_path = cache_root / FRAME_INDEX_METADATA_FILE
-        if not _index_is_valid(metadata_path, self._path, self._offsets_path):
-            if status_callback is not None:
-                status_callback(f"Indexing {self._path.name} without parsing atom records")
-            frame_count, atom_count = _build_xyz_index(
-                self._path,
-                self._offsets_path,
-            )
-            identity = SourceIdentity.from_path(
-                self._path,
-                self._path.stat().st_mtime_ns,
-                self._path.stat().st_size,
-            )
-            _write_json_atomic(
-                metadata_path,
-                {
-                    "source": identity.to_json(),
-                    "frame_count": frame_count,
-                    "atom_count": atom_count,
-                },
-            )
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        frame_count = int(metadata["frame_count"])
-        atom_count = int(metadata["atom_count"])
-        self._offsets = np.memmap(
-            self._offsets_path,
-            dtype=np.uint64,
-            mode="r",
-            shape=(frame_count,),
+        with self._path.open("rb") as source_handle:
+            header = source_handle.readline()
+        try:
+            atom_count = int(header.strip())
+        except ValueError as exc:
+            self._file.close()
+            raise ValueError("XYZ trajectory does not start with an atom-count line") from exc
+        if atom_count <= 0:
+            self._file.close()
+            raise ValueError("XYZ atom count must be positive")
+
+        def publish_progress(frame_count: int, complete: bool) -> None:
+            self.summary.frame_count = int(frame_count)
+            self.summary.frame_count_is_final = bool(complete)
+            if index_progress_callback is not None:
+                index_progress_callback(int(frame_count), bool(complete))
+
+        self._index = ProgressiveXyzIndex(
+            self._path,
+            cache_root,
+            atom_count=atom_count,
+            progress_callback=publish_progress,
         )
-        first = self._read_atoms(0)
-        if len(first) != atom_count:
-            raise ValueError("XYZ frame index atom count does not match the first frame")
-        self.summary = _summary_from_atoms(first, frame_count)
+        try:
+            first = self._read_frame(0, atom_count=atom_count)
+            self.summary = RandomAccessSummary(
+                frame_count=self._index.known_frame_count,
+                atom_count=atom_count,
+                atom_numbers=first.atom_numbers,
+                symbols=list(first.symbols),
+                has_cell=first.cell is not None,
+            )
+            self.summary.frame_count_is_final = self._index.complete
+            if not self._index.complete and status_callback is not None:
+                status_callback(
+                    f"Opened first frame; indexing {self._path.name} in the background"
+                )
+            self._index.start()
+        except Exception:
+            self._index.close()
+            self._file.close()
+            raise
 
     def read_frame(self, frame_index: int) -> tuple[np.ndarray, np.ndarray | None]:
         index = int(frame_index)
-        atoms = self._read_atoms(index)
-        _validate_atom_layout(atoms, self.summary, index)
-        return _arrays_from_atoms(atoms)
+        frame = self._read_frame(index)
+        if not np.array_equal(frame.atom_numbers, self.summary.atom_numbers):
+            raise ValueError(f"Frame {index} atom ordering differs from the first frame")
+        return frame.positions, frame.cell
+
+    def wait_for_index_update(
+        self,
+        previous_count: int,
+        *,
+        timeout_s: float,
+    ) -> tuple[int, bool]:
+        frame_count, complete = self._index.wait_for_update(
+            int(previous_count),
+            timeout_s=float(timeout_s),
+        )
+        self.summary.frame_count = int(frame_count)
+        self.summary.frame_count_is_final = bool(complete)
+        return frame_count, complete
 
     def close(self) -> None:
-        mmap_obj = getattr(self._offsets, "_mmap", None)
-        if mmap_obj is not None:
-            mmap_obj.close()
+        self._index.close()
         self._file.close()
 
-    def _read_atoms(self, frame_index: int):
-        from ase.io.extxyz import _read_xyz_frame, key_val_str_to_dict
-
-        if frame_index < 0 or frame_index >= len(self._offsets):
+    def _read_frame(self, frame_index: int, *, atom_count: int | None = None):
+        if frame_index < 0 or frame_index >= self._index.known_frame_count:
             raise IndexError(frame_index)
-        start = int(self._offsets[frame_index])
-        end = (
-            int(self._offsets[frame_index + 1])
-            if frame_index + 1 < len(self._offsets)
-            else self._path.stat().st_size
-        )
+        start = self._index.offset(frame_index)
         self._file.seek(start)
-        text = io.StringIO(self._file.read(end - start).decode("utf-8", errors="replace"))
-        try:
-            atom_count = int(text.readline().strip())
-        except ValueError as exc:
-            raise ValueError(f"Invalid XYZ frame header at frame {frame_index}") from exc
-        return _read_xyz_frame(text, atom_count, key_val_str_to_dict, nvec=0)
+        expected_atoms = self._index.atom_count if atom_count is None else int(atom_count)
+        return read_xyz_frame(self._file, expected_atoms, frame_index)
+
+
+class _StaticStructureReader:
+    def __init__(self, path: Path) -> None:
+        self._frame = read_structure(path)
+        self.summary = RandomAccessSummary(
+            frame_count=1,
+            atom_count=self._frame.positions.shape[0],
+            atom_numbers=self._frame.atom_numbers,
+            symbols=list(self._frame.symbols),
+            has_cell=self._frame.cell is not None,
+        )
+
+    def read_frame(self, frame_index: int) -> tuple[np.ndarray, np.ndarray | None]:
+        if int(frame_index) != 0:
+            raise IndexError(frame_index)
+        return self._frame.positions, self._frame.cell
+
+    def wait_for_index_update(
+        self,
+        previous_count: int,
+        *,
+        timeout_s: float,
+    ) -> tuple[int, bool]:
+        del previous_count, timeout_s
+        return 1, True
+
+    def close(self) -> None:
+        self._frame = None
 
 
 def _open_reader(
@@ -276,6 +483,7 @@ def _open_reader(
     cache_root: Path,
     *,
     status_callback: Callable[[str], None] | None,
+    index_progress_callback: Callable[[int, bool], None] | None,
 ) -> RandomAccessFrameReader:
     suffix = source.trajectory_path.suffix.lower()
     if suffix == ".traj":
@@ -285,9 +493,12 @@ def _open_reader(
             source.trajectory_path,
             cache_root,
             status_callback=status_callback,
+            index_progress_callback=index_progress_callback,
         )
     if suffix in {".xtc", ".trr"}:
         return _GromacsReader(source)
+    if suffix in {".gro", ".pdb", ".cif"}:
+        return _StaticStructureReader(source.trajectory_path)
     raise ValueError(f"Random frame access is not supported for {source.trajectory_path.name}")
 
 
@@ -317,103 +528,12 @@ def _store_matches_summary(
     )
 
 
-def _summary_from_atoms(atoms, frame_count: int) -> RandomAccessSummary:
-    return RandomAccessSummary(
-        frame_count=int(frame_count),
-        atom_count=len(atoms),
-        atom_numbers=np.asarray(atoms.get_atomic_numbers(), dtype=np.uint16),
-        symbols=list(atoms.get_chemical_symbols()),
-        has_cell=bool(np.any(np.asarray(atoms.cell.array, dtype=np.float32))),
+def _reader_state_dir_for_source(source_path: Path) -> Path:
+    path = source_path.resolve()
+    cache_base = Path(
+        os.environ.get("LOCALAPPDATA")
+        or os.environ.get("XDG_CACHE_HOME")
+        or (Path.home() / ".cache")
     )
-
-
-def _validate_atom_layout(atoms, summary: RandomAccessSummary, frame_index: int) -> None:
-    if len(atoms) != summary.atom_count:
-        raise ValueError(
-            f"Frame {frame_index} has {len(atoms)} atoms; expected {summary.atom_count}"
-        )
-    numbers = np.asarray(atoms.get_atomic_numbers(), dtype=np.uint16)
-    if not np.array_equal(numbers, summary.atom_numbers):
-        raise ValueError(f"Frame {frame_index} atom ordering differs from the first frame")
-
-
-def _arrays_from_atoms(atoms) -> tuple[np.ndarray, np.ndarray | None]:
-    positions = np.ascontiguousarray(atoms.get_positions(), dtype=np.float32)
-    cell = np.asarray(atoms.cell.array, dtype=np.float32)
-    return positions, np.ascontiguousarray(cell) if np.any(cell) else None
-
-
-def _cell_from_timestep(timestep) -> np.ndarray | None:
-    cell = getattr(timestep, "triclinic_dimensions", None)
-    if cell is None:
-        return None
-    matrix = np.ascontiguousarray(cell, dtype=np.float32)
-    if matrix.shape != (3, 3) or not np.any(matrix):
-        return None
-    return matrix
-
-
-def _build_xyz_index(source: Path, offsets_path: Path) -> tuple[int, int]:
-    file_size = source.stat().st_size
-    if file_size <= 0:
-        raise ValueError("No frames found in trajectory")
-    with source.open("rb") as handle:
-        header = handle.readline()
-    try:
-        atom_count = int(header.strip())
-    except ValueError as exc:
-        raise ValueError("XYZ trajectory does not start with an atom-count line") from exc
-    if atom_count <= 0:
-        raise ValueError("XYZ atom count must be positive")
-
-    lines_per_frame = atom_count + 2
-    frame_count = 1
-    with source.open("rb") as source_handle, offsets_path.open("wb") as output:
-        output.write(np.uint64(0).tobytes())
-        with mmap.mmap(source_handle.fileno(), length=0, access=mmap.ACCESS_READ) as mapped:
-            line_count = 0
-            for chunk_start in range(0, file_size, INDEX_CHUNK_BYTES):
-                chunk_size = min(INDEX_CHUNK_BYTES, file_size - chunk_start)
-                chunk = np.frombuffer(mapped, dtype=np.uint8, count=chunk_size, offset=chunk_start)
-                newlines = np.flatnonzero(chunk == 10)
-                first_boundary = lines_per_frame - 1 - (line_count % lines_per_frame)
-                if first_boundary < newlines.size:
-                    boundaries = newlines[first_boundary::lines_per_frame]
-                    offsets = boundaries.astype(np.uint64, copy=True)
-                    offsets += np.uint64(chunk_start + 1)
-                    offsets = offsets[offsets < file_size]
-                    if offsets.size:
-                        offsets.tofile(output)
-                        frame_count += int(offsets.size)
-                line_count += int(newlines.size)
-                del newlines
-                del chunk
-
-    offsets_size = offsets_path.stat().st_size
-    if offsets_size != frame_count * np.dtype(np.uint64).itemsize:
-        raise RuntimeError("XYZ frame index size is inconsistent")
-    return frame_count, atom_count
-
-
-def _index_is_valid(metadata_path: Path, source: Path, offsets_path: Path) -> bool:
-    if not metadata_path.exists() or not offsets_path.exists():
-        return False
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        stat = source.stat()
-        expected = SourceIdentity.from_path(source, stat.st_mtime_ns, stat.st_size)
-        stored = SourceIdentity.from_json(metadata["source"])
-        frame_count = int(metadata["frame_count"])
-        return (
-            stored == expected
-            and frame_count > 0
-            and offsets_path.stat().st_size == frame_count * np.dtype(np.uint64).itemsize
-        )
-    except Exception:
-        return False
-
-
-def _write_json_atomic(path: Path, data: dict[str, object]) -> None:
-    temporary = path.with_suffix(f"{path.suffix}.tmp")
-    temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    digest = hashlib.sha256(os.fsencode(str(path))).hexdigest()[:20]
+    return cache_base / "TrajPlayer" / "readers" / digest

@@ -45,7 +45,7 @@ jobs:
           sudo apt-get install -y xvfb libegl1 libgl1 libgl1-mesa-dri libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
 
       - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: python -m pip install -e ".[dev]"
 
       - name: Verify tag version
         shell: bash
@@ -57,14 +57,23 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
+          python -c "from trajplayer.trajcore import NATIVE_AVAILABLE; assert NATIVE_AVAILABLE"
           python -m pytest -q
           python scripts/check_release.py
 
       - name: Build portable archive
         run: python scripts/build_release.py
 
+      - name: Create portable reader fixtures
+        run: python scripts/create_smoke_fixtures.py --output smoke-fixtures
+
       - name: Report portable bundle size
-        run: python scripts/report_bundle_size.py
+        run: >-
+          python scripts/report_bundle_size.py
+          --json-output bundle-size-${{ matrix.label }}.json
+          --baseline-file scripts/bundle_size_baselines.json
+          --platform ${{ matrix.label }}
+          --max-growth-percent 5
 
       - name: Smoke-test Windows portable runtime
         if: runner.os == 'Windows'
@@ -83,12 +92,22 @@ jobs:
             Get-Content "dist/TrajPlayer/traj_player_error.log" -ErrorAction SilentlyContinue
             throw "Portable TrajPlayer exited with code $($process.ExitCode)."
           }
+          & "dist/TrajPlayer/TrajPlayer.exe" `
+            --reader-smoke=smoke-fixtures `
+            --reader-smoke-output=reader-smoke.json
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content "dist/TrajPlayer/traj_player_error.log" -ErrorAction SilentlyContinue
+            throw "Portable TrajPlayer reader smoke test failed."
+          }
+          Get-Content reader-smoke.json
 
       - name: Smoke-test Linux portable runtime
         if: runner.os == 'Linux'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
+          ./dist/TrajPlayer/TrajPlayer --reader-smoke=smoke-fixtures --reader-smoke-output=reader-smoke.json
+          cat reader-smoke.json
           xvfb-run -a ./dist/TrajPlayer/TrajPlayer --gui-smoke --gui-smoke-timeout-ms=20000 --gui-smoke-output=gui-smoke.json examples/c60.extxyz
           cat gui-smoke.json
 
@@ -97,6 +116,8 @@ jobs:
         env:
           QT_QPA_PLATFORM: cocoa
         run: |
+          ./dist/TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer --reader-smoke=smoke-fixtures --reader-smoke-output=reader-smoke.json
+          cat reader-smoke.json
           ./dist/TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer --gui-smoke --gui-smoke-timeout-ms=20000 --gui-smoke-output=gui-smoke.json examples/c60.extxyz
           cat gui-smoke.json
           codesign --verify --deep --strict dist/TrajPlayer-macOS/TrajPlayer.app
@@ -110,6 +131,7 @@ jobs:
             TrajPlayer-*.zip.sha256
             TrajPlayer-*.tar.gz
             TrajPlayer-*.tar.gz.sha256
+            bundle-size-*.json
           if-no-files-found: error
 
   publish:

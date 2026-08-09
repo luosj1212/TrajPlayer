@@ -17,7 +17,7 @@ if not exist "%VENV%\Scripts\python.exe" (
 call "%VENV%\Scripts\activate.bat"
 python -m pip install --upgrade pip
 if errorlevel 1 goto :failed
-python -m pip install -r requirements-dev.txt
+python -m pip install -e ".[dev]"
 if errorlevel 1 goto :failed
 python -m pytest -q
 if errorlevel 1 goto :failed

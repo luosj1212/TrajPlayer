@@ -23,6 +23,61 @@ class FrameCacheBudget:
     mode: str
 
 
+@dataclass(frozen=True)
+class ViewerMemoryAllocation:
+    frame_cache: FrameCacheBudget
+    renderer_bytes: int
+    topology_bytes: int
+    persistent_writer_bytes: int
+
+    @property
+    def reserved_working_set_bytes(self) -> int:
+        return self.renderer_bytes + self.topology_bytes + self.persistent_writer_bytes
+
+    @property
+    def total_bytes(self) -> int:
+        return self.frame_cache.bytes + self.reserved_working_set_bytes
+
+
+class MemoryBudgetManager:
+    """Allocate frame, renderer, topology, and optional writer memory together."""
+
+    def __init__(
+        self,
+        *,
+        atom_count: int,
+        available_bytes: int | None = None,
+    ) -> None:
+        self.atom_count = max(0, int(atom_count))
+        self.available_bytes = available_bytes
+
+    def allocate(
+        self,
+        *,
+        frame_bytes: int,
+        frame_count: int,
+        prefetch_radius: int,
+        persistent_writer_bytes: int = 0,
+    ) -> ViewerMemoryAllocation:
+        renderer_bytes = self.atom_count * 32
+        topology_bytes = self.atom_count * 16
+        writer_bytes = max(0, int(persistent_writer_bytes))
+        reserved = renderer_bytes + topology_bytes + writer_bytes
+        frame_cache = choose_frame_cache_budget(
+            frame_bytes=frame_bytes,
+            frame_count=frame_count,
+            prefetch_radius=prefetch_radius,
+            reserved_working_set_bytes=reserved,
+            available_bytes=self.available_bytes,
+        )
+        return ViewerMemoryAllocation(
+            frame_cache=frame_cache,
+            renderer_bytes=renderer_bytes,
+            topology_bytes=topology_bytes,
+            persistent_writer_bytes=writer_bytes,
+        )
+
+
 def available_memory_bytes() -> int | None:
     """Return currently available physical memory without adding a dependency."""
     if sys.platform == "win32":

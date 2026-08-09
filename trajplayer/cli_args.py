@@ -12,6 +12,8 @@ class CliArgs:
     gui_smoke: bool = False
     gui_smoke_output: Path | None = None
     gui_smoke_timeout_ms: int = 15_000
+    reader_smoke: Path | None = None
+    reader_smoke_output: Path | None = None
     doctor_output: Path | None = None
     benchmark_output: Path | None = None
     benchmark_root: Path | None = None
@@ -30,6 +32,8 @@ def parse_cli_args(argv: list[str]) -> CliArgs:
     gui_smoke = False
     gui_smoke_output: Path | None = None
     gui_smoke_timeout_ms = 15_000
+    reader_smoke: Path | None = None
+    reader_smoke_output: Path | None = None
     doctor_output: Path | None = None
     benchmark_output: Path | None = None
     benchmark_root: Path | None = None
@@ -49,6 +53,10 @@ def parse_cli_args(argv: list[str]) -> CliArgs:
             gui_smoke_output = Path(arg.split("=", 1)[1])
         elif arg.startswith("--gui-smoke-timeout-ms="):
             gui_smoke_timeout_ms = max(1_000, int(arg.split("=", 1)[1]))
+        elif arg.startswith("--reader-smoke="):
+            reader_smoke = Path(arg.split("=", 1)[1])
+        elif arg.startswith("--reader-smoke-output="):
+            reader_smoke_output = Path(arg.split("=", 1)[1])
         elif arg.startswith("--doctor-output="):
             doctor_output = Path(arg.split("=", 1)[1])
         elif arg.startswith("--smoke-exit-ms="):
@@ -79,6 +87,8 @@ def parse_cli_args(argv: list[str]) -> CliArgs:
         gui_smoke=gui_smoke,
         gui_smoke_output=gui_smoke_output,
         gui_smoke_timeout_ms=gui_smoke_timeout_ms,
+        reader_smoke=reader_smoke,
+        reader_smoke_output=reader_smoke_output,
         doctor_output=doctor_output,
         benchmark_output=benchmark_output,
         benchmark_root=benchmark_root,
