@@ -7,8 +7,11 @@ import numpy as np
 
 try:
     from . import _trajcore as _native
-except ImportError:
+except ImportError as exc:
     _native = None
+    NATIVE_IMPORT_ERROR: ImportError | None = exc
+else:
+    NATIVE_IMPORT_ERROR = None
 
 
 NATIVE_AVAILABLE = _native is not None

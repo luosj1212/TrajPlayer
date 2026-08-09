@@ -1419,10 +1419,14 @@ def main() -> None:
     if cli_args.startup_smoke:
         return
     if cli_args.native_smoke:
-        from trajplayer.trajcore import NATIVE_AVAILABLE
+        from trajplayer.trajcore import NATIVE_AVAILABLE, NATIVE_IMPORT_ERROR
 
         if not NATIVE_AVAILABLE:
-            print("[native-smoke] trajplayer._trajcore is unavailable", flush=True)
+            print(
+                "[native-smoke] trajplayer._trajcore is unavailable: "
+                f"{NATIVE_IMPORT_ERROR!r}",
+                flush=True,
+            )
             raise SystemExit(2)
         print("[native-smoke] trajplayer._trajcore is available", flush=True)
         return

@@ -2,10 +2,12 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.build_release import (
     _platform_label,
+    _stage_native_extension,
     validate_portable_archive,
     validate_portable_tree,
 )
@@ -30,6 +32,26 @@ MACOS_MEMBERS = (
 
 
 class BuildReleaseTests(unittest.TestCase):
+    def test_stage_native_extension_copies_an_editable_build_into_the_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            package_dir = root / "trajplayer"
+            package_dir.mkdir()
+            source = root / "editable" / "_trajcore.cp310-win_amd64.pyd"
+            source.parent.mkdir()
+            source.write_bytes(b"native-extension")
+            with (
+                patch("scripts.build_release.ROOT", root),
+                patch(
+                    "scripts.build_release.find_spec",
+                    return_value=SimpleNamespace(origin=str(source)),
+                ),
+            ):
+                staged = _stage_native_extension()
+
+            self.assertEqual(staged, package_dir / source.name)
+            self.assertEqual(staged.read_bytes(), b"native-extension")
+
     def test_validate_portable_tree_accepts_complete_windows_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             dist_root = Path(temporary_directory)

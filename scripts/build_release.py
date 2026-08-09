@@ -9,6 +9,7 @@ import sys
 import tarfile
 import zipfile
 from fnmatch import fnmatch
+from importlib.util import find_spec
 from pathlib import Path
 
 
@@ -137,21 +138,40 @@ def _prepare_portable_tree(system: str) -> Path:
     return portable_dir
 
 
+def _stage_native_extension() -> Path | None:
+    spec = find_spec("trajplayer._trajcore")
+    if spec is None or spec.origin is None:
+        raise SystemExit("trajplayer._trajcore is not installed; build the native extension first")
+    source = Path(spec.origin).resolve()
+    if not source.is_file():
+        raise SystemExit(f"trajplayer._trajcore was not found at {source}")
+    target = (ROOT / "trajplayer" / source.name).resolve()
+    if source == target:
+        return None
+    shutil.copy2(source, target)
+    return target
+
+
 def build_release(*, skip_pyinstaller: bool = False) -> Path:
     system, architecture, archive_format = _platform_label()
     if not skip_pyinstaller:
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "PyInstaller",
-                "--noconfirm",
-                "--clean",
-                str(ROOT / "TrajPlayer.spec"),
-            ],
-            cwd=ROOT,
-            check=True,
-        )
+        staged_native = _stage_native_extension()
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "PyInstaller",
+                    "--noconfirm",
+                    "--clean",
+                    str(ROOT / "TrajPlayer.spec"),
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+        finally:
+            if staged_native is not None:
+                staged_native.unlink(missing_ok=True)
     portable_dir = _prepare_portable_tree(system)
     validate_portable_tree(portable_dir, system=system)
 

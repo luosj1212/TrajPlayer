@@ -130,6 +130,7 @@ jobs:
           codesign --verify --deep --strict dist/TrajPlayer-macOS/TrajPlayer.app
 
       - name: Upload package artifact
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: TrajPlayer-${{ matrix.label }}
@@ -139,7 +140,7 @@ jobs:
             TrajPlayer-*.tar.gz
             TrajPlayer-*.tar.gz.sha256
             bundle-size-*.json
-          if-no-files-found: error
+          if-no-files-found: warn
 
   publish:
     name: Publish GitHub release

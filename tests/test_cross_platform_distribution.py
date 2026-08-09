@@ -27,6 +27,8 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         self.assertIn("base_dir=portable_dir.name", release_source)
         self.assertIn('"gztar"', release_source)
         self.assertIn('"TrajPlayer/**/_trajcore*.so"', release_source)
+        self.assertIn("_stage_native_extension()", release_source)
+        self.assertIn("shutil.copy2(source, target)", release_source)
 
     def test_macos_build_creates_a_native_app_bundle_and_preserves_it(self) -> None:
         spec_source = Path("TrajPlayer.spec").read_text(encoding="utf-8")
