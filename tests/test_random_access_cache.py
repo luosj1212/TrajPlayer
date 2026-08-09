@@ -79,21 +79,29 @@ class RandomAccessCacheTests(unittest.TestCase):
         )
         stop_event = threading.Event()
         background_ready = threading.Event()
+        background_ready_times: list[float] = []
+
+        def wait_for_background() -> None:
+            if coordinator.wait_for_background_turn(stop_event):
+                background_ready_times.append(time.monotonic())
+                background_ready.set()
 
         with coordinator.foreground():
-            thread = threading.Thread(
-                target=lambda: (
-                    coordinator.wait_for_background_turn(stop_event)
-                    and background_ready.set()
-                )
-            )
+            thread = threading.Thread(target=wait_for_background)
             thread.start()
-            time.sleep(0.02)
+            pause_deadline = time.monotonic() + 0.5
+            while coordinator.stats_snapshot().pause_count == 0:
+                self.assertLess(time.monotonic(), pause_deadline)
+                time.sleep(0.001)
             self.assertFalse(background_ready.is_set())
+            foreground_release_started_s = time.monotonic()
 
-        self.assertFalse(background_ready.wait(timeout=0.015))
-        self.assertTrue(background_ready.wait(timeout=0.2))
+        self.assertTrue(background_ready.wait(timeout=0.5))
         thread.join(timeout=1.0)
+        self.assertGreaterEqual(
+            background_ready_times[0] - foreground_release_started_s,
+            0.03,
+        )
         stats = coordinator.stats_snapshot()
         self.assertEqual(stats.foreground_reads, 1)
         self.assertGreaterEqual(stats.pause_count, 1)
