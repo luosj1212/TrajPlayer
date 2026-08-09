@@ -49,7 +49,7 @@ class BuildReleaseTests(unittest.TestCase):
             ):
                 staged = _stage_native_extension()
 
-            self.assertEqual(staged, package_dir / source.name)
+            self.assertEqual(staged, (package_dir / source.name).resolve())
             self.assertEqual(staged.read_bytes(), b"native-extension")
 
     def test_validate_portable_tree_accepts_complete_windows_runtime(self) -> None:
