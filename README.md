@@ -37,9 +37,9 @@ continue in the specialized tools users already prefer.
 ## Highlights
 
 - OpenGL instanced atoms and bonds with no per-atom CPU drawing loop
-- Contiguous `(T, N, 3)` float32 sidecar data backed by `numpy.memmap`
-- Background streaming, direction-aware prefetch, and a bounded 256 MiB frame cache
-- Target-first random access while uncached trajectories fill progressively
+- Contiguous `(T, N, 3)` float32 decoded data backed by `numpy.memmap`
+- Background streaming, direction-aware prefetch, and a 64-256 MiB adaptive frame cache
+- Target-first random access with demand-driven sparse decoded sidecars
 - Live slider scrubbing without waiting for mouse release
 - Sequential 1-60 FPS playback with no trajectory-frame skipping
 - Ball-stick, Ball, and Bond representations with adjustable radii
@@ -214,19 +214,25 @@ architecture.
 
 ```mermaid
 flowchart LR
-    UI["Qt controls"] --> P["Playback scheduler"]
-    P --> S["Background frame streamer"]
-    S --> M["float32 memmap sidecar"]
-    S --> G["OpenGL upload buffers"]
+    UI["Qt controls"] --> P["Playback clock"]
+    P --> Q["One-frame present queue"]
+    D["Trajectory reader"] --> M["Demand-driven decoded memmap cache"]
+    M --> S["Adaptive RAM frame cache"]
+    S --> L["Frame lease"]
+    L --> G["OpenGL upload buffers"]
     G --> R["Instanced atom and bond draws"]
+    R --> A["frameSwapped acknowledgement"]
+    A --> P
 ```
 
-The UI thread schedules work and submits ready GPU buffers. Trajectory I/O,
-indexing, cache population, and filter-buffer preparation remain off the UI
-thread. A sidecar cache grows on disk as frames are requested, while the RAM
-window remains bounded independently of total trajectory length. Rendering is
-event-driven while idle and wakes only for playback deadlines or newly ready
-frames.
+The UI thread schedules work and submits one ready frame at a time. Trajectory
+I/O, indexing, cache population, and filter-buffer preparation remain off the
+UI thread. Random-access readers decode only the requested directional window;
+they no longer fill the complete sidecar while idle. A frame lease pins each RAM
+slot while the renderer owns the current frame, avoiding a second full-frame CPU copy.
+Playback advances only after `frameSwapped`, so slow hardware lowers cadence
+instead of skipping trajectory frames or blocking controls with synchronous
+painting.
 
 ## Reference Performance
 
@@ -235,7 +241,7 @@ OpenGL 3.3, with GPU completion timing enabled produced:
 
 | Scene | Cadence | Paint | Position upload | Paint + upload |
 | --- | ---: | ---: | ---: | ---: |
-| 100,000 atoms + 99,999 bonds | 59.8 FPS | 2.56 ms avg | 0.43 ms avg | 2.98 ms avg |
+| 100,000 atoms + 99,999 bonds | 59.9 FPS | 2.45 ms avg | 0.35 ms avg | 2.80 ms avg |
 
 This is a reference result, not a hardware-independent guarantee. Display
 refresh, GPU driver, bond count, window size, and cache state all affect the
@@ -250,6 +256,12 @@ python app.py --benchmark-output=benchmark.json --benchmark-atoms=100000 \
 ```
 
 Generated benchmark stores and reports are ignored by Git.
+
+After building a portable package, inspect dependency-level bundle size with:
+
+```bash
+python scripts/report_bundle_size.py
+```
 
 ## Requirements
 
@@ -273,7 +285,7 @@ sudo apt-get install libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 \
 - No ribbon, molecular surface, volume, label, or publication renderer
 - No built-in RMSD/RMSF analysis, measurements, scripting API, or video export
 - XTC/TRR requires a compatible GRO topology
-- The sidecar cache consumes additional disk space and is invalidated when its source changes
+- Requested decoded frames consume additional sidecar disk space; the cache is invalidated when its source changes
 
 ## Development
 

@@ -63,6 +63,9 @@ jobs:
       - name: Build portable archive
         run: python scripts/build_release.py
 
+      - name: Report portable bundle size
+        run: python scripts/report_bundle_size.py
+
       - name: Smoke-test Windows portable runtime
         if: runner.os == 'Windows'
         shell: pwsh

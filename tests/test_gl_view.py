@@ -219,6 +219,19 @@ class GlViewDefaultsTests(unittest.TestCase):
         self.assertIn("_upload_frame_buffers", gl_view.MoleculeGLWidget.paintGL.__code__.co_names)
         self.assertNotIn("makeCurrent", gl_view.MoleculeGLWidget.set_frame.__code__.co_names)
         self.assertNotIn("doneCurrent", gl_view.MoleculeGLWidget.set_frame.__code__.co_names)
+        self.assertNotIn("copyto", gl_view.MoleculeGLWidget.set_frame.__code__.co_names)
+        self.assertNotIn("repaint", gl_view.MoleculeGLWidget.set_frame.__code__.co_names)
+        self.assertIn("release_frame_reference", gl_view.MoleculeGLWidget.set_frame.__code__.co_names)
+
+    def test_camera_drag_defers_depth_sort_until_interaction_is_idle(self) -> None:
+        move_names = gl_view.MoleculeGLWidget.mouseMoveEvent.__code__.co_names
+
+        self.assertIn("_depth_sort_timer", move_names)
+        self.assertIn("start", move_names)
+        self.assertNotIn("_rebuild_render_atom_arrays", move_names)
+        self.assertNotIn("_depth_order_dirty", move_names)
+        self.assertGreaterEqual(gl_view.DEPTH_SORT_IDLE_MS, 50)
+        self.assertLessEqual(gl_view.DEPTH_SORT_IDLE_MS, 100)
 
     def test_render_modes_switch_draw_paths_without_per_frame_geometry_rebuilds(self) -> None:
         self.assertEqual(

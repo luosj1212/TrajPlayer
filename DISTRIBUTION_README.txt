@@ -52,7 +52,8 @@ Display
 - Playback speed is adjustable from 1 to 60 FPS. Frames are always displayed in sequence and are never skipped.
 
 Performance
-- Traj, XTC, and TRR trajectories load requested frames directly while the float32 cache fills in the background.
+- Traj, XTC, and TRR trajectories decode the requested directional window on demand instead of filling the entire float32 cache while idle.
+- RAM prefetch is selected automatically from the frame size and currently available memory.
 - XYZ and extXYZ trajectories use a reusable frame-offset index for direct frame reads.
 - Hybrid-GPU Windows laptops automatically request the NVIDIA high-performance GPU when available.
 - Keep current graphics drivers installed; TrajPlayer falls back to the available OpenGL 3.3 GPU.

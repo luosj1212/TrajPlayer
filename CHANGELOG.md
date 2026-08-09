@@ -3,6 +3,24 @@
 All notable changes to TrajPlayer are documented here. The project follows
 [Semantic Versioning](https://semver.org/) once it reaches a stable release.
 
+## [Unreleased]
+
+### Changed
+
+- Added leased frame-cache slots so OpenGL uploads use the streamer's contiguous
+  frame directly without a second renderer-side full-frame copy
+- Replaced synchronous playback repainting with a one-frame present queue that
+  advances only after Qt emits `frameSwapped`; sequential playback still never
+  skips trajectory frames
+- Deferred camera depth sorting until pointer interaction is idle, avoiding
+  repeated `O(N log N)` sorts and static VBO uploads while dragging
+- Replaced the fixed 256 MiB RAM cache with a 64-256 MiB adaptive budget that
+  accounts for available memory, frame size, and the renderer/topology working set
+- Changed random-access trajectories to populate sparse decoded sidecars only
+  for requested directional prefetch windows instead of filling every frame in
+  the background
+- Added dependency-level portable bundle size reporting to release builds
+
 ## [0.1.0-alpha.5] - 2026-08-08
 
 ### Added

@@ -67,6 +67,45 @@ class FrameStreamerTests(unittest.TestCase):
                     self.assertEqual(streamer.target_indices(7, direction=1, interactive=True), (7, 8, 9))
                 finally:
                     streamer.stop()
+
+    def test_frame_lease_prevents_slot_reuse_until_released(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with BinaryTrajectoryStore.create(
+                Path(tmp) / "lease.tpdata",
+                frame_count=2,
+                atom_numbers=np.array([1], dtype=np.uint16),
+                symbols=["H"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+            ) as store:
+                store.positions[:] = np.arange(6, dtype=np.float32).reshape(2, 1, 3)
+                store.flush()
+                streamer = FrameStreamer(
+                    store,
+                    prefetch_radius=0,
+                    max_memory_bytes=12,
+                )
+                try:
+                    streamer.start()
+                    streamer.seek(0)
+                    self.assertIsNotNone(streamer.wait_for_frame(0, timeout_s=2.0))
+                    lease = streamer.acquire_frame(0)
+                    self.assertIsNotNone(lease)
+                    expected = lease.positions.copy()
+
+                    streamer.seek(1)
+                    time.sleep(0.05)
+                    self.assertFalse(streamer.has_frame(1))
+                    np.testing.assert_array_equal(lease.positions, expected)
+
+                    lease.release()
+                    lease.release()
+                    self.assertIsNotNone(streamer.wait_for_frame(1, timeout_s=2.0))
+                    self.assertTrue(streamer.has_frame(1))
+                finally:
+                    streamer.stop()
+
     def test_background_prefetch_uses_bounded_ring_buffer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with BinaryTrajectoryStore.create(

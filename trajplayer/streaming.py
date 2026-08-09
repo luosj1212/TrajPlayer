@@ -8,10 +8,53 @@ from collections.abc import Callable
 import numpy as np
 
 from .binary_store import BinaryTrajectoryStore
+from .memory_budget import (
+    FrameCacheBudget,
+    choose_frame_cache_budget,
+    estimate_viewer_working_set_bytes,
+)
 
 
-DEFAULT_PREFETCH_MEMORY_BYTES = 256 * 1024 * 1024
 DEFAULT_INTERACTIVE_PREFETCH_FRAMES = 5
+
+
+class FrameLease:
+    """Pins one cache slot while the consumer owns the current frame reference."""
+
+    __slots__ = ("frame_index", "positions", "cell", "_owner", "_slot")
+
+    def __init__(
+        self,
+        owner: "FrameStreamer",
+        *,
+        frame_index: int,
+        slot: int,
+    ) -> None:
+        self.frame_index = int(frame_index)
+        self.positions = owner._buffer[slot]
+        self.cell = None if owner._cell_buffer is None else owner._cell_buffer[slot]
+        self._owner: FrameStreamer | None = owner
+        self._slot = int(slot)
+
+    @property
+    def released(self) -> bool:
+        return self._owner is None
+
+    def release(self) -> None:
+        owner = self._owner
+        if owner is None:
+            return
+        self._owner = None
+        owner._release_slot(self._slot)
+
+    def __enter__(self) -> "FrameLease":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        self.release()
+
+    def __del__(self) -> None:
+        self.release()
 
 
 class FrameStreamer:
@@ -22,25 +65,42 @@ class FrameStreamer:
         store: BinaryTrajectoryStore,
         *,
         prefetch_radius: int = 200,
-        max_memory_bytes: int = DEFAULT_PREFETCH_MEMORY_BYTES,
+        max_memory_bytes: int | None = None,
         interactive_prefetch_frames: int = DEFAULT_INTERACTIVE_PREFETCH_FRAMES,
         frame_ready_callback: Callable[[int], None] | None = None,
         error_callback: Callable[[BaseException], None] | None = None,
     ) -> None:
         if prefetch_radius < 0:
             raise ValueError("prefetch_radius must be non-negative")
-        if max_memory_bytes <= 0:
+        if max_memory_bytes is not None and max_memory_bytes <= 0:
             raise ValueError("max_memory_bytes must be positive")
         if interactive_prefetch_frames <= 0:
             raise ValueError("interactive_prefetch_frames must be positive")
 
         self.store = store
         self.prefetch_radius = int(prefetch_radius)
-        self.max_memory_bytes = int(max_memory_bytes)
         self.interactive_prefetch_frames = int(interactive_prefetch_frames)
         self.frame_bytes = int(store.atom_count * 3 * np.dtype(np.float32).itemsize)
         if store.has_cells:
             self.frame_bytes += int(3 * 3 * np.dtype(np.float32).itemsize)
+        if max_memory_bytes is None:
+            self.memory_budget = choose_frame_cache_budget(
+                frame_bytes=self.frame_bytes,
+                frame_count=store.frame_count,
+                prefetch_radius=self.prefetch_radius,
+                reserved_working_set_bytes=estimate_viewer_working_set_bytes(
+                    store.atom_count
+                ),
+            )
+            self.max_memory_bytes = self.memory_budget.bytes
+        else:
+            self.max_memory_bytes = int(max_memory_bytes)
+            self.memory_budget = FrameCacheBudget(
+                bytes=self.max_memory_bytes,
+                available_memory_bytes=0,
+                reserved_working_set_bytes=0,
+                mode="fixed",
+            )
         radius_capacity = self.prefetch_radius * 2 + 1
         budget_capacity = max(1, self.max_memory_bytes // max(1, self.frame_bytes))
         self.capacity = min(store.frame_count, radius_capacity, budget_capacity)
@@ -65,6 +125,7 @@ class FrameStreamer:
         self._thread: threading.Thread | None = None
         self._index_to_slot: dict[int, int] = {}
         self._slot_to_index: dict[int, int] = {}
+        self._slot_lease_counts = np.zeros(self.capacity, dtype=np.int32)
 
     @property
     def memory_bytes(self) -> int:
@@ -142,6 +203,10 @@ class FrameStreamer:
                 return None
             return self._buffer[slot]
 
+    def has_frame(self, frame_index: int) -> bool:
+        with self._lock:
+            return int(frame_index) in self._index_to_slot
+
     def get_cell(self, frame_index: int) -> np.ndarray | None:
         if self._cell_buffer is None:
             return None
@@ -150,6 +215,15 @@ class FrameStreamer:
             if slot is None:
                 return None
             return self._cell_buffer[slot]
+
+    def acquire_frame(self, frame_index: int) -> FrameLease | None:
+        with self._ready:
+            index = int(frame_index)
+            slot = self._index_to_slot.get(index)
+            if slot is None:
+                return None
+            self._slot_lease_counts[slot] += 1
+            return FrameLease(self, frame_index=index, slot=slot)
 
     def wait_for_frame(self, frame_index: int, *, timeout_s: float) -> np.ndarray | None:
         deadline = time.monotonic() + timeout_s
@@ -259,6 +333,17 @@ class FrameStreamer:
                     if not self.store.is_frame_available(frame_index):
                         continue
                     slot = self._reserve_slot(target_set)
+                    while (
+                        slot is None
+                        and not self._stop
+                        and request_serial == self._request_serial
+                    ):
+                        self._ready.wait()
+                        slot = self._reserve_slot(target_set)
+                    if self._stop or request_serial != self._request_serial:
+                        break
+                    if slot is None:
+                        continue
 
                 np.copyto(self._buffer[slot], self.store.frame(frame_index))
                 if self._cell_buffer is not None:
@@ -318,25 +403,34 @@ class FrameStreamer:
         with self._lock:
             for frame_index in tuple(self._index_to_slot):
                 if frame_index not in keep:
-                    slot = self._index_to_slot.pop(frame_index)
-                    self._slot_to_index.pop(slot, None)
+                    slot = self._index_to_slot[frame_index]
+                    if self._slot_lease_counts[slot] == 0:
+                        self._index_to_slot.pop(frame_index, None)
+                        self._slot_to_index.pop(slot, None)
 
-    def _reserve_slot(self, keep: set[int]) -> int:
+    def _reserve_slot(self, keep: set[int]) -> int | None:
         for slot in range(self.capacity):
             if slot not in self._slot_to_index:
                 return slot
 
         for evict_index, slot in tuple(self._index_to_slot.items()):
-            if evict_index not in keep:
+            if evict_index not in keep and self._slot_lease_counts[slot] == 0:
                 self._index_to_slot.pop(evict_index, None)
                 self._slot_to_index.pop(slot, None)
                 return slot
-        raise RuntimeError("No frame-cache slot is available")
+        return None
 
     def _remove_slot(self, slot: int) -> None:
         old_index = self._slot_to_index.pop(slot, None)
         if old_index is not None:
             self._index_to_slot.pop(old_index, None)
+
+    def _release_slot(self, slot: int) -> None:
+        with self._ready:
+            if self._slot_lease_counts[slot] <= 0:
+                return
+            self._slot_lease_counts[slot] -= 1
+            self._ready.notify_all()
 
     def _notify_frame_ready(self, frame_index: int) -> None:
         callback = self._frame_ready_callback

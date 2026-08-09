@@ -55,6 +55,7 @@ from trajplayer.diagnostics import diagnostics_json, probe_opengl
 from trajplayer.gl_view import MoleculeGLWidget, default_surface_format
 from trajplayer.gui_smoke import GuiSmokeController
 from trajplayer.playback import PlaybackEngine
+from trajplayer.present_queue import FramePresentQueue
 from trajplayer.random_access_cache import (
     open_random_access_session,
     supports_random_access_source,
@@ -413,40 +414,29 @@ class TrajectoryOpenThread(QThread):
         store: BinaryTrajectoryStore,
         progress_callback,
     ) -> None:
-        background_index = store.available_prefix_count
         while (
             not self._cancel_event.is_set()
             and store.available_frame_count < store.frame_count
         ):
             with self._request_condition:
-                request_serial = self._request_serial
-                requested = self._requested_indices
-
-            frame_index = next(
-                (index for index in requested if index < store.frame_count and not store.is_frame_available(index)),
-                None,
-            )
-            requested_frame = frame_index is not None
-            if frame_index is None:
-                while background_index < store.frame_count and store.is_frame_available(background_index):
-                    background_index += 1
-                if background_index >= store.frame_count:
-                    break
-                frame_index = background_index
+                frame_index: int | None = None
+                while not self._cancel_event.is_set() and frame_index is None:
+                    frame_index = next(
+                        (
+                            index
+                            for index in self._requested_indices
+                            if index < store.frame_count
+                            and not store.is_frame_available(index)
+                        ),
+                        None,
+                    )
+                    if frame_index is None:
+                        self._request_condition.wait()
+                if self._cancel_event.is_set():
+                    return
 
             write_reader_frame(reader, store, frame_index)
-            if frame_index == background_index:
-                background_index += 1
-
-            if requested_frame:
-                with self._request_condition:
-                    is_current_target = (
-                        request_serial == self._request_serial
-                        and bool(self._requested_indices)
-                        and frame_index == self._requested_indices[0]
-                    )
-                if is_current_target:
-                    self.cache_frame_ready.emit(frame_index)
+            self.cache_frame_ready.emit(frame_index)
             progress_callback(store.available_frame_count, store.frame_count)
 
 
@@ -527,6 +517,7 @@ class TrajPlayerWindow(QMainWindow):
         self.bond_thread: BondInferenceThread | None = None
         self._retired_bond_threads: set[BondInferenceThread] = set()
         self.playback: PlaybackEngine | None = None
+        self.present_queue = FramePresentQueue()
         self.current_frame = 0
         self.displayed_frame = -1
         self.last_stream_seek_frame = 0
@@ -553,6 +544,7 @@ class TrajPlayerWindow(QMainWindow):
         self.gui_smoke_controller: GuiSmokeController | None = None
 
         self.gl_view = MoleculeGLWidget()
+        self.gl_view.frameSwapped.connect(self.on_frame_swapped)
         self.stream_frame_ready.connect(self.on_stream_frame_ready)
         self.stream_failed.connect(self.on_stream_failed)
 
@@ -991,7 +983,7 @@ class TrajPlayerWindow(QMainWindow):
         self.open_button.setEnabled(False)
         self.file_label.setText(f"Opening {source.display_name}")
         self.file_label.setToolTip(source.tooltip)
-        self.info_label.setText("Preparing binary float32 trajectory cache")
+        self.info_label.setText("Opening trajectory metadata and first frame")
         self.status_bar.showMessage("Opening trajectory without blocking the UI")
         self.progress_bar.setRange(0, 0)
         self.progress_bar.show()
@@ -1007,16 +999,18 @@ class TrajPlayerWindow(QMainWindow):
     def on_open_progress(self, thread: TrajectoryOpenThread, done: int, total: int) -> None:
         if thread is not self.open_thread:
             return
-        self.progress_bar.setRange(0, max(total, 1))
-        self.progress_bar.setValue(done)
+        random_access = self.store is not None and self.store.supports_random_access
+        if not random_access:
+            self.progress_bar.setRange(0, max(total, 1))
+            self.progress_bar.setValue(done)
         if self.streamer is not None:
             self.streamer.notify_store_updated()
         if self.store is not None and self.cache_build_in_progress:
             self.update_available_controls()
-        operation = "Caching requested and nearby frames" if (
-            self.store is not None and self.store.supports_random_access
-        ) else "Converting to contiguous float32 cache"
-        self.status_bar.showMessage(f"{operation}: {done}/{total} frames")
+        if not random_access:
+            self.status_bar.showMessage(
+                f"Converting to contiguous float32 cache: {done}/{total} frames"
+            )
 
     def on_cache_frame_ready(
         self,
@@ -1041,11 +1035,11 @@ class TrajPlayerWindow(QMainWindow):
             return
         self.cache_build_in_progress = True
         self.activate_trajectory(source, store)
-        self.progress_bar.show()
+        self.progress_bar.hide()
         self.open_button.setEnabled(True)
         self.update_available_controls()
         self.status_bar.showMessage(
-            f"First frame ready; on-demand cache {store.available_frame_count}/{store.frame_count} frames"
+            "First frame ready; nearby frames will be decoded on demand"
         )
 
     def on_trajectory_loaded(
@@ -1109,6 +1103,7 @@ class TrajPlayerWindow(QMainWindow):
         source: TrajectorySource,
         store: BinaryTrajectoryStore,
     ) -> None:
+        self.present_queue.clear()
         self.store = store
 
         def report_stream_error(error: BaseException) -> None:
@@ -1230,11 +1225,24 @@ class TrajPlayerWindow(QMainWindow):
         cache_text = ""
         if self.streamer is not None:
             cache_mib = self.streamer.memory_bytes / (1024.0 * 1024.0)
-            cache_text = f", {self.streamer.capacity}-frame/{cache_mib:.0f} MiB cache"
+            budget_mode = (
+                "auto"
+                if self.streamer.memory_budget.mode.startswith("auto")
+                else "fixed"
+            )
+            cache_text = (
+                f", {self.streamer.capacity}-frame/{cache_mib:.0f} MiB "
+                f"{budget_mode} cache"
+            )
+        disk_cache_text = (
+            f"{self.store.available_frame_count}/{self.store.frame_count} frames cached on demand"
+            if self.store.supports_random_access and not self.store.is_complete
+            else f"{self.store.available_frame_count}/{self.store.frame_count} frames on disk"
+        )
         self.info_label.setText(
             f"{self.store.frame_count} frames, {self.store.atom_count} atoms{bond_text}, "
             f"directional prefetch{cache_text}, "
-            f"{self.store.available_frame_count}/{self.store.frame_count} frames on disk, "
+            f"{disk_cache_text}, "
             f"{self.render_mode_combo.currentText()} GPU instancing"
         )
 
@@ -1537,7 +1545,6 @@ class TrajPlayerWindow(QMainWindow):
         )
         self.playback.start(frame_index=0, now_s=time.perf_counter())
         self.set_play_button_state(True)
-        self.gl_view.set_immediate_paint(True)
         self.schedule_next_render_tick()
         self.benchmark_poll_timer.start()
 
@@ -1571,6 +1578,8 @@ class TrajPlayerWindow(QMainWindow):
             if self.benchmark_diagnostics is not None
             else {},
             "streamer_memory_bytes": self.streamer.memory_bytes if self.streamer is not None else 0,
+            "streamer_budget_bytes": self.streamer.max_memory_bytes if self.streamer is not None else 0,
+            "streamer_budget_mode": self.streamer.memory_budget.mode if self.streamer is not None else "none",
             "conservative_depth": self.gl_view.conservative_depth_enabled,
             "opengl": self.gl_view.gl_diagnostics,
         }
@@ -1604,6 +1613,8 @@ class TrajPlayerWindow(QMainWindow):
         self.open_thread = None
 
         self.stop_playback()
+        self.present_queue.clear()
+        self.gl_view.release_frame_reference()
         self.cache_build_in_progress = False
         self.stop_bond_inference(wait_ms=0)
         self.trajectory_generation += 1
@@ -1677,6 +1688,8 @@ class TrajPlayerWindow(QMainWindow):
     def on_render_tick(self) -> None:
         if self.store is None or self.streamer is None:
             return
+        if self.present_queue.has_pending_frame:
+            return
 
         tick_time = time.perf_counter()
         if self.benchmark_diagnostics is not None:
@@ -1713,20 +1726,42 @@ class TrajPlayerWindow(QMainWindow):
                 self.benchmark_diagnostics.record_duplicate_frame()
             self.schedule_next_render_tick()
             return
-        frame = self.streamer.get_frame(self.current_frame)
-        if frame is None:
+        lease = self.streamer.acquire_frame(self.current_frame)
+        if lease is None:
             if self.benchmark_diagnostics is not None:
                 self.benchmark_diagnostics.record_no_frame()
             self.schedule_next_render_tick()
             return
 
-        cell = self.streamer.get_cell(self.current_frame)
-        self.gl_view.set_frame(frame, reset_view=self.reset_view_on_next_frame, cell=cell)
+        frame_index = self.current_frame
+        if not self.present_queue.begin(frame_index):
+            lease.release()
+            return
+        try:
+            self.gl_view.set_frame(
+                lease.positions,
+                reset_view=self.reset_view_on_next_frame,
+                cell=lease.cell,
+                release_callback=lease.release,
+            )
+        except Exception:
+            self.present_queue.clear()
+            lease.release()
+            raise
         if self.benchmark_diagnostics is not None:
             self.benchmark_diagnostics.record_upload(timestamp_s=time.perf_counter())
         self.reset_view_on_next_frame = False
-        self.displayed_frame = self.current_frame
+        self.schedule_next_render_tick()
+
+    def on_frame_swapped(self) -> None:
+        frame_index = self.present_queue.acknowledge()
+        if frame_index is None:
+            return
+        self.displayed_frame = frame_index
         self.update_frame_label()
+        if self.current_frame != self.displayed_frame:
+            self.render_timer.start(0)
+            return
         self.schedule_next_render_tick()
 
     def on_stream_frame_ready(self, frame_index: int) -> None:
@@ -1760,22 +1795,26 @@ class TrajPlayerWindow(QMainWindow):
             direction = 1 if delta > 0 else -1 if delta < 0 else 0
         self.last_stream_seek_frame = target
         self.streamer.seek(target, direction=direction, interactive=interactive)
-        if self.streamer.get_frame(target) is not None:
+        if (
+            self.streamer.capacity == 1
+            and not self.streamer.has_frame(target)
+            and not self.present_queue.has_pending_frame
+        ):
+            self.gl_view.release_frame_reference()
+        if self.streamer.has_frame(target) and not self.present_queue.has_pending_frame:
             self.render_timer.start(0)
         thread = self.open_thread
-        if (
-            self.store is not None
-            and not self.store.is_frame_available(target)
-            and thread is not None
-            and thread.isRunning()
-        ):
-            thread.request_frames(
-                self.streamer.target_indices(
-                    target,
-                    direction=direction,
-                    interactive=interactive,
-                )
+        if self.store is not None and thread is not None and thread.isRunning():
+            target_indices = self.streamer.target_indices(
+                target,
+                direction=direction,
+                interactive=interactive,
             )
+            if any(
+                not self.store.is_frame_available(index)
+                for index in target_indices
+            ):
+                thread.request_frames(target_indices)
 
     def toggle_playback(self) -> None:
         if self.store is None:
@@ -1793,7 +1832,6 @@ class TrajPlayerWindow(QMainWindow):
         )
         self.playback.start(frame_index=self.current_frame, now_s=time.perf_counter())
         self.set_play_button_state(True)
-        self.gl_view.set_immediate_paint(True)
         self.schedule_next_render_tick()
 
     def stop_playback(self) -> None:
@@ -1802,14 +1840,19 @@ class TrajPlayerWindow(QMainWindow):
         self.playback = None
         self.set_play_button_state(False)
         if self.benchmark_output is None:
-            self.gl_view.set_immediate_paint(False)
             self.render_timer.stop()
 
     def schedule_next_render_tick(self) -> None:
-        if self.playback is None or not self.playback.running:
+        if self.present_queue.has_pending_frame:
             self.render_timer.stop()
             return
         if self.displayed_frame != self.current_frame:
+            if self.streamer is not None and self.streamer.has_frame(self.current_frame):
+                self.render_timer.start(0)
+            else:
+                self.render_timer.stop()
+            return
+        if self.playback is None or not self.playback.running:
             self.render_timer.stop()
             return
         delay_s = self.playback.next_frame_delay_s(time.perf_counter())

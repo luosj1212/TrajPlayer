@@ -82,7 +82,26 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn('QCheckBox("Box")', source)
         self.assertIn("self.box_check.toggled.connect", source)
         self.assertIn("self.gl_view.set_box_enabled", source)
-        self.assertIn("self.streamer.get_cell(self.current_frame)", source)
+        self.assertIn("cell=lease.cell", source)
+
+    def test_playback_waits_for_frame_swap_and_never_uses_synchronous_repaint(self) -> None:
+        source = Path("app.py").read_text(encoding="utf-8")
+        renderer = Path("trajplayer/gl_view.py").read_text(encoding="utf-8")
+
+        self.assertIn("self.gl_view.frameSwapped.connect(self.on_frame_swapped)", source)
+        self.assertIn("self.present_queue.begin(frame_index)", source)
+        self.assertIn("self.present_queue.acknowledge()", source)
+        self.assertNotIn("set_immediate_paint", source)
+        self.assertNotIn("self.repaint()", renderer)
+
+    def test_random_access_cache_only_decodes_requested_prefetch_frames(self) -> None:
+        source = Path("app.py").read_text(encoding="utf-8")
+        method = source.split("def _fill_random_access_cache(", 1)[1]
+        method = method.split("class BondInferenceThread", 1)[0]
+
+        self.assertIn("self._request_condition.wait()", method)
+        self.assertIn("self._requested_indices", method)
+        self.assertNotIn("background_index", method)
 
     def test_transport_ui_uses_compact_icon_controls_and_60fps_scrubbing(self) -> None:
         source = Path("app.py").read_text(encoding="utf-8")

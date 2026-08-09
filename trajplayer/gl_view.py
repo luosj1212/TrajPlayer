@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable
 
 import numpy as np
 from shiboken6 import VoidPtr
-from PySide6.QtCore import QByteArray, QPoint, Qt
+from PySide6.QtCore import QByteArray, QPoint, QTimer, Qt
 from PySide6.QtGui import QMatrix4x4, QMouseEvent, QSurfaceFormat, QVector3D, QWheelEvent
 from PySide6.QtOpenGL import (
     QOpenGLBuffer,
@@ -36,6 +37,7 @@ GL_VENDOR = 0x1F00
 GL_RENDERER = 0x1F01
 GL_VERSION = 0x1F02
 POSITION_BUFFER_COUNT = 3
+DEPTH_SORT_IDLE_MS = 80
 
 DEFAULT_BACKGROUND = (1.0, 1.0, 1.0, 1.0)
 BALL_STICK_ATOM_RADIUS_SCALE = 0.25
@@ -672,12 +674,16 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._benchmark_finish_gpu = False
         self._render_stats: RenderStats | None = None
         self._last_upload_ms = 0.0
-        self._immediate_paint = False
+        self._frame_release: Callable[[], None] | None = None
         self._cleaning_up = False
         self._conservative_depth_enabled = False
         self._gl_vendor = "unknown"
         self._gl_renderer = "unknown"
         self._gl_version = "unknown"
+        self._depth_sort_timer = QTimer(self)
+        self._depth_sort_timer.setSingleShot(True)
+        self._depth_sort_timer.setInterval(DEPTH_SORT_IDLE_MS)
+        self._depth_sort_timer.timeout.connect(self._refresh_depth_order_after_interaction)
 
     @property
     def render_stats(self) -> RenderStats | None:
@@ -698,12 +704,9 @@ class MoleculeGLWidget(QOpenGLWidget):
     def enable_benchmark_stats(self, *, finish_gpu: bool) -> None:
         self._benchmark_finish_gpu = bool(finish_gpu)
         self._render_stats = RenderStats()
-        self._immediate_paint = True
-
-    def set_immediate_paint(self, enabled: bool) -> None:
-        self._immediate_paint = bool(enabled)
 
     def set_atoms(self, atom_numbers: np.ndarray) -> None:
+        self.release_frame_reference()
         covalent_radii, vdw_radii, colors = atom_render_arrays(atom_numbers)
         self._atom_count = int(covalent_radii.shape[0])
         self._covalent_radii = covalent_radii
@@ -866,7 +869,7 @@ class MoleculeGLWidget(QOpenGLWidget):
             self._cell_inverse_columns = np.empty((0, 3), dtype=np.float32)
             self._box_vertices = np.empty((0, 3), dtype=np.float32)
         else:
-            matrix = np.ascontiguousarray(cell, dtype=np.float32)
+            matrix = np.array(cell, dtype=np.float32, copy=True, order="C")
             if matrix.shape != (3, 3):
                 raise ValueError(f"Expected cell shape (3, 3), got {matrix.shape}")
             if self._box_has_cell and np.array_equal(matrix, self._box_cell):
@@ -902,14 +905,28 @@ class MoleculeGLWidget(QOpenGLWidget):
             self.doneCurrent()
         self.update()
 
-    def set_frame(self, positions: np.ndarray, *, reset_view: bool = False, cell: np.ndarray | None = None) -> None:
-        frame = np.asarray(positions, dtype=np.float32)
+    def set_frame(
+        self,
+        positions: np.ndarray,
+        *,
+        reset_view: bool = False,
+        cell: np.ndarray | None = None,
+        release_callback: Callable[[], None] | None = None,
+    ) -> None:
+        frame = np.asarray(positions)
         if frame.shape != (self._atom_count, 3):
+            if release_callback is not None:
+                release_callback()
             raise ValueError(f"Expected frame shape {(self._atom_count, 3)}, got {frame.shape}")
+        if frame.dtype != np.float32 or not frame.flags.c_contiguous:
+            frame = np.ascontiguousarray(frame, dtype=np.float32)
+            if release_callback is not None:
+                release_callback()
+                release_callback = None
+        self.release_frame_reference()
         self.set_cell(cell)
-        if self._positions.shape != frame.shape:
-            self._positions = np.empty(frame.shape, dtype=np.float32)
-        np.copyto(self._positions, frame)
+        self._positions = frame
+        self._frame_release = release_callback
         self._frame_upload_pending = True
         if reset_view:
             self._fit_camera_to_frame(
@@ -918,10 +935,14 @@ class MoleculeGLWidget(QOpenGLWidget):
                 minimum_radius=1.8 if self._visible_atom_count < self._atom_count else 1.0,
             )
             self._depth_order_dirty = True
-        if self._immediate_paint and self.isVisible():
-            self.repaint()
-        else:
-            self.update()
+        self.update()
+
+    def release_frame_reference(self) -> None:
+        self._depth_sort_timer.stop()
+        release = self._frame_release
+        self._frame_release = None
+        if release is not None:
+            release()
 
     def set_background_rgb(self, rgb: tuple[float, float, float]) -> None:
         self._background = (float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0)
@@ -1061,6 +1082,8 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._upload_frame_buffers()
 
     def cleanup(self) -> None:
+        self._depth_sort_timer.stop()
+        self.release_frame_reference()
         if self._cleaning_up or not self.isValid():
             return
         self._cleaning_up = True
@@ -1241,8 +1264,12 @@ class MoleculeGLWidget(QOpenGLWidget):
         if event.buttons() & Qt.MouseButton.LeftButton:
             self._yaw += float(delta.x()) * 0.35
             self._pitch = max(-89.0, min(89.0, self._pitch + float(delta.y()) * 0.35))
-            self._depth_order_dirty = True
+            self._depth_sort_timer.start()
             self.update()
+
+    def _refresh_depth_order_after_interaction(self) -> None:
+        self._depth_order_dirty = True
+        self.update()
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
         steps = event.angleDelta().y() / 120.0
