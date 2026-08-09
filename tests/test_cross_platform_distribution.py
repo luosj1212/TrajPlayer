@@ -66,6 +66,8 @@ class CrossPlatformDistributionTests(unittest.TestCase):
         self.assertIn("--reader-smoke", ci)
         self.assertIn("--reader-smoke", release)
         self.assertIn("--native-smoke", release)
+        self.assertIn("$nativeProcess.WaitForExit(30000)", release)
+        self.assertIn("$readerProcess.WaitForExit(60000)", release)
         self.assertIn("xvfb-run", release)
         self.assertIn("libgl1-mesa-dri", release)
         self.assertIn("macos-15", ci)
