@@ -10,7 +10,7 @@ body:
     id: version
     attributes:
       label: TrajPlayer version
-      placeholder: v0.1.0-alpha.7
+      placeholder: v0.1.0-alpha.8
     validations:
       required: true
   - type: dropdown
@@ -21,6 +21,7 @@ body:
         - Windows 11
         - Windows 10
         - Linux
+        - macOS
         - Other
     validations:
       required: true

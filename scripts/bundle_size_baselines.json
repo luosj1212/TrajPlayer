@@ -1,50 +1,50 @@
 {
-  "version": "v0.1.0-alpha.7",
+  "version": "v0.1.0-alpha.8",
   "platforms": {
     "Windows-x64": {
-      "total_bytes": 131714140,
+      "total_bytes": 131718979,
       "groups": {
         "Qt": 80083641,
         "Chemfiles": 2845662,
         "NumPy": 27829002,
         "ASE": 609,
-        "TrajPlayer": 4370570,
+        "TrajPlayer": 4375409,
         "Licenses and docs": 51120,
         "Other": 16533536
       }
     },
     "Linux-x86_64": {
-      "total_bytes": 225001028,
+      "total_bytes": 225006996,
       "groups": {
         "Qt": 102380181,
         "Chemfiles": 3897566,
         "NumPy": 42788754,
         "ASE": 609,
-        "TrajPlayer": 4184240,
+        "TrajPlayer": 4190208,
         "Licenses and docs": 50205,
         "Other": 71699473
       }
     },
     "macOS-arm64": {
-      "total_bytes": 102007041,
+      "total_bytes": 102011297,
       "groups": {
         "Qt": 63070999,
         "Chemfiles": 3585190,
         "NumPy": 6921956,
         "ASE": 609,
-        "TrajPlayer": 28374577,
+        "TrajPlayer": 28378833,
         "Licenses and docs": 50236,
         "Other": 3474
       }
     },
     "macOS-x86_64": {
-      "total_bytes": 108288051,
+      "total_bytes": 108292227,
       "groups": {
         "Qt": 65141847,
         "Chemfiles": 4028582,
         "NumPy": 10637444,
         "ASE": 609,
-        "TrajPlayer": 28425859,
+        "TrajPlayer": 28430035,
         "Licenses and docs": 50236,
         "Other": 3474
       }
