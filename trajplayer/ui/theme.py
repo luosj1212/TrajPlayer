@@ -15,6 +15,21 @@ QFrame#transportBar {
     background: #ffffff;
     border-top: 1px solid #dfe3e8;
 }
+QSplitter#contentSplitter {
+    background: #f4f6f8;
+}
+QSplitter#contentSplitter::handle {
+    width: 1px;
+    background: #dfe3e8;
+}
+QScrollArea#inspectorScroll, QScrollArea#inspectorScroll > QWidget > QWidget {
+    background: #ffffff;
+    border: 0;
+}
+QFrame#inspectorPanel {
+    background: #ffffff;
+    border-left: 1px solid #dfe3e8;
+}
 QLabel#fileLabel {
     color: #20242a;
     font-size: 10pt;
@@ -32,6 +47,15 @@ QLabel#frameLabel {
 QLabel#controlLabel {
     color: #59636f;
     font-size: 9pt;
+}
+QLabel#controlLabel:disabled, QLabel#sizeValueLabel:disabled {
+    color: #9ca3ab;
+}
+QLabel#sectionLabel {
+    color: #20242a;
+    font-size: 9pt;
+    font-weight: 600;
+    padding-top: 2px;
 }
 QLabel#sizeValueLabel {
     color: #303740;
@@ -77,6 +101,32 @@ QToolButton#playButton {
 QToolButton#playButton:hover {
     background: #125b94;
     border-color: #125b94;
+}
+QToolButton#inspectorToggleButton {
+    min-width: 32px;
+    max-width: 32px;
+    padding: 0;
+}
+QToolButton#inspectorToggleButton:checked {
+    background: #e7f0f8;
+    border-color: #8aa8c7;
+}
+QToolButton#advancedToggle {
+    min-height: 26px;
+    border: 0;
+    border-radius: 3px;
+    background: transparent;
+    color: #4f5965;
+    padding: 0 2px;
+    text-align: left;
+}
+QToolButton#advancedToggle:hover {
+    background: #eef2f6;
+    color: #20242a;
+}
+QFrame#advancedContent {
+    background: transparent;
+    border: 0;
 }
 QCheckBox {
     color: #38414b;
@@ -201,4 +251,3 @@ QStatusBar {
     border-top: 1px solid #dfe3e8;
 }
 """
-

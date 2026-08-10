@@ -6,6 +6,7 @@ import numpy as np
 
 from .trajcore import candidate_pairs as trajcore_candidate_pairs
 from .trajcore import connected_components as trajcore_connected_components
+from .trajcore import select_valence_bonds as trajcore_select_valence_bonds
 
 
 BOND_DISTANCE_SCALE = 1.25
@@ -101,32 +102,17 @@ def infer_bonds(
     )
     if candidate_distance2.size == 0:
         return np.empty((0, 2), dtype=np.int32)
-
-    degrees = np.zeros(atom_count, dtype=np.uint8)
-    max_bond_count = min(
-        int(candidate_distance2.shape[0]),
-        int(np.sum(caps, dtype=np.int64) // 2),
-    )
-    bonds = np.empty((max_bond_count, 2), dtype=np.int32)
-    bond_count = 0
-    order = np.lexsort((candidate_right, candidate_left, candidate_distance2))
-    for candidate_index in order:
-        if cancelled is not None and cancelled():
-            return np.empty((0, 2), dtype=np.int32)
-        i = int(candidate_left[candidate_index])
-        j = int(candidate_right[candidate_index])
-        if degrees[i] >= caps[i] or degrees[j] >= caps[j]:
-            continue
-        degrees[i] += 1
-        degrees[j] += 1
-        bonds[bond_count] = (i, j)
-        bond_count += 1
-        if bond_count == max_bond_count:
-            break
-
-    if bond_count == 0:
+    if cancelled is not None and cancelled():
         return np.empty((0, 2), dtype=np.int32)
-    return np.ascontiguousarray(bonds[:bond_count], dtype=np.int32)
+    bonds = trajcore_select_valence_bonds(
+        candidate_distance2,
+        candidate_left,
+        candidate_right,
+        caps,
+    )
+    if cancelled is not None and cancelled():
+        return np.empty((0, 2), dtype=np.int32)
+    return bonds
 
 
 def bond_segments_for_frame(

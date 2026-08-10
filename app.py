@@ -156,6 +156,8 @@ class TrajPlayerWindow(MainWindowView):
         self.benchmark_finish_gpu = False
         self.benchmark_warmup_started_s = 0.0
         self.benchmark_memory_idle: ProcessMemorySnapshot | None = None
+        self.benchmark_camera_spin_deadline_s = 0.0
+        self.benchmark_camera_spin_complete = True
         self.automation_mode = False
         self.gui_smoke_controller: GuiSmokeController | None = None
         self.startup_metrics: dict[str, float] = {
@@ -188,6 +190,7 @@ class TrajPlayerWindow(MainWindowView):
             reset_camera=self.reset_view,
         )
         self.commands.bind_buttons(self)
+        self.retranslate_ui()
 
         self.render_timer = QTimer(self)
         self.render_timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -199,6 +202,10 @@ class TrajPlayerWindow(MainWindowView):
         self.benchmark_warmup_timer = QTimer(self)
         self.benchmark_warmup_timer.setInterval(10)
         self.benchmark_warmup_timer.timeout.connect(self.check_benchmark_warmup)
+        self.benchmark_camera_timer = QTimer(self)
+        self.benchmark_camera_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.benchmark_camera_timer.setInterval(16)
+        self.benchmark_camera_timer.timeout.connect(self.on_benchmark_camera_tick)
         self.scrub_preview_timer = QTimer(self)
         self.scrub_preview_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.scrub_preview_timer.setInterval(self.SCRUB_PREVIEW_TIMER_MS)
@@ -246,10 +253,10 @@ class TrajPlayerWindow(MainWindowView):
     def open_file(self) -> None:
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Open trajectory (select GRO + XTC/TRR together)",
+            self._t("open_dialog"),
             "",
-            "Trajectory files (*.traj *.xyz *.extxyz *.pdb *.cif *.gro *.xtc *.trr);;"
-            "Gromacs files (*.gro *.xtc *.trr);;All files (*.*)",
+            f"{self._t('trajectory_files')} (*.traj *.xyz *.extxyz *.pdb *.cif *.gro *.xtc *.trr);;"
+            f"{self._t('gromacs_files')} (*.gro *.xtc *.trr);;{self._t('all_files')} (*.*)",
         )
         if file_paths:
             self.load_trajectory_paths(Path(path) for path in file_paths)
@@ -273,8 +280,8 @@ class TrajPlayerWindow(MainWindowView):
         if self._retired_open_stores:
             self._pending_open_source = source
             self.set_loading_state(source)
-            self.info_label.setText("Waiting for the previous cache operation to stop")
-            self.status_bar.showMessage("Queued trajectory open; background I/O is stopping")
+            self.info_label.setText(self._t("waiting_previous"))
+            self.status_bar.showMessage(self._t("queued_open"))
             return
         self._pending_open_source = None
         self._start_trajectory_open(source)
@@ -323,10 +330,10 @@ class TrajPlayerWindow(MainWindowView):
 
     def set_loading_state(self, source: TrajectorySource) -> None:
         self.open_button.setEnabled(False)
-        self.file_label.setText(f"Opening {source.display_name}")
+        self.file_label.setText(self._t("opening", name=source.display_name))
         self.file_label.setToolTip(source.tooltip)
-        self.info_label.setText("Opening trajectory metadata and first frame")
-        self.status_bar.showMessage("Opening trajectory without blocking the UI")
+        self.info_label.setText(self._t("opening_metadata"))
+        self.status_bar.showMessage(self._t("opening_ui"))
         self.progress_bar.setRange(0, 0)
         self.progress_bar.show()
         self.set_controls_enabled(False)
@@ -351,7 +358,7 @@ class TrajPlayerWindow(MainWindowView):
             self.update_available_controls()
         if not random_access:
             self.status_bar.showMessage(
-                f"Converting to contiguous float32 cache: {done}/{total} frames"
+                self._t("converting", done=done, total=total)
             )
 
     def on_index_progress(
@@ -369,11 +376,11 @@ class TrajPlayerWindow(MainWindowView):
         self.update_frame_label()
         if complete:
             self.status_bar.showMessage(
-                f"Indexed {frame_count} frames; direct trajectory reading is ready"
+                self._t("indexed", count=frame_count)
             )
         else:
             self.status_bar.showMessage(
-                f"First frame ready; background index has found {frame_count} frames"
+                self._t("indexing", count=frame_count)
             )
 
     def on_trajectory_preview(
@@ -392,7 +399,7 @@ class TrajPlayerWindow(MainWindowView):
         self.open_button.setEnabled(True)
         self.update_available_controls()
         self.status_bar.showMessage(
-            "First frame ready; nearby frames will be decoded on demand"
+            self._t("nearby_ready")
         )
 
     def on_trajectory_loaded(
@@ -425,11 +432,13 @@ class TrajPlayerWindow(MainWindowView):
         self.frame_slider.setEnabled(store.frame_count > 1)
         self.progress_bar.hide()
         if bool(store.metadata.get("direct_reader")):
-            source_label = "direct reader"
+            source_label = self._t("direct_reader")
         else:
-            source_label = "cache" if from_cache else "new binary cache"
+            source_label = self._t("cache") if from_cache else self._t("new_cache")
         self.update_trajectory_info()
-        self.status_bar.showMessage(f"Loaded {source.display_name} from {source_label}")
+        self.status_bar.showMessage(
+            self._t("loaded", name=source.display_name, source=source_label)
+        )
         self.open_button.setEnabled(True)
         self.set_controls_enabled(store.frame_count > 1)
         self.commands.set_reset_enabled(True)
@@ -541,7 +550,7 @@ class TrajPlayerWindow(MainWindowView):
         if self.filter_mode == "chain":
             self.on_filter_mode_changed("all")
         self.update_trajectory_info()
-        self.status_bar.showMessage("Bond inference disabled")
+        self.status_bar.showMessage(self._t("bond_disabled"))
 
     def on_render_mode_changed(self) -> None:
         mode = str(self.render_mode_combo.currentData())
@@ -549,7 +558,12 @@ class TrajPlayerWindow(MainWindowView):
         self.set_representation_controls_enabled(self.store is not None)
         self.update_trajectory_info()
         if self.store is not None:
-            self.status_bar.showMessage(f"Representation: {self.render_mode_combo.currentText()}")
+            self.status_bar.showMessage(
+                self._t(
+                    "representation_status",
+                    mode=self.render_mode_combo.currentText(),
+                )
+            )
 
     def on_atom_size_changed(self, value: int) -> None:
         self.gl_view.set_atom_size_scale(int(value) / 100.0)
@@ -575,36 +589,51 @@ class TrajPlayerWindow(MainWindowView):
         if self.store is None:
             return
         bond_count = self.gl_view.bond_count
-        bond_text = f", Bonds: {self.bond_topology.description} ({bond_count})"
-        cache_text = ""
         if self.streamer is not None:
             cache_mib = self.streamer.memory_bytes / (1024.0 * 1024.0)
-            budget_mode = (
+            budget_mode = self._t(
                 "auto"
                 if self.streamer.memory_budget.mode.startswith("auto")
                 else "fixed"
             )
-            cache_text = (
-                f", {self.streamer.capacity}-frame/{cache_mib:.0f} MiB "
-                f"{budget_mode} cache"
+            cache_text = self._t(
+                "prefetch_cache",
+                capacity=self.streamer.capacity,
+                mib=cache_mib,
+                mode=budget_mode,
             )
+        else:
+            cache_text = self._t("prefetch_pending")
         if bool(self.store.metadata.get("direct_reader")):
             disk_cache_text = (
-                "direct source"
+                self._t("direct_source")
                 if self.store.frame_count_is_final
-                else f"direct source, indexing ({self.store.frame_count}+ frames found)"
+                else self._t("direct_indexing", count=self.store.frame_count)
             )
         else:
             disk_cache_text = (
-                f"{self.store.available_frame_count}/{self.store.frame_count} frames cached on demand"
+                self._t(
+                    "frames_cached",
+                    available=self.store.available_frame_count,
+                    total=self.store.frame_count,
+                )
                 if self.store.supports_random_access and not self.store.is_complete
-                else f"{self.store.available_frame_count}/{self.store.frame_count} frames on disk"
+                else self._t(
+                    "frames_on_disk",
+                    available=self.store.available_frame_count,
+                    total=self.store.frame_count,
+                )
             )
         self.info_label.setText(
-            f"{self.store.frame_count} frames, {self.store.atom_count} atoms{bond_text}, "
-            f"directional prefetch{cache_text}, "
-            f"{disk_cache_text}, "
-            f"{self.render_mode_combo.currentText()} GPU instancing"
+            self._t(
+                "trajectory_info",
+                frames=self.store.frame_count,
+                atoms=self.store.atom_count,
+                bonds=bond_count,
+                cache=cache_text,
+                disk=disk_cache_text,
+                mode=self.render_mode_combo.currentText(),
+            )
         )
 
     def configure_filter_controls(self, atom_count: int) -> None:
@@ -612,9 +641,12 @@ class TrajPlayerWindow(MainWindowView):
         largest_index = max(1, int(atom_count))
         label_width = max(
             76,
-            self.filter_value_label.fontMetrics().horizontalAdvance(f"Atom {largest_index}") + 6,
+            self.filter_value_label.fontMetrics().horizontalAdvance(
+                self._t("atom_value", value=largest_index)
+            )
+            + 6,
         )
-        self.filter_value_label.setFixedWidth(label_width)
+        self.filter_value_label.setMinimumWidth(label_width)
         self.filter_mode = "all"
         self.filter_values = {"atom": 1}
         self.selected_chains = (1,)
@@ -627,8 +659,8 @@ class TrajPlayerWindow(MainWindowView):
         self.filter_value_slider.setValue(1)
         self.filter_value_slider.setEnabled(False)
         self.filter_value_slider.blockSignals(False)
-        self.filter_value_slider.setToolTip("All atoms are visible")
-        self.filter_value_label.setText("All atoms")
+        self.filter_value_slider.setToolTip(self._t("all_atoms_tooltip"))
+        self.filter_value_label.setText(self._t("all_atoms"))
         self.filter_value_label.setEnabled(False)
         self.chain_selection_edit.blockSignals(True)
         self.chain_selection_edit.setText("1")
@@ -642,16 +674,16 @@ class TrajPlayerWindow(MainWindowView):
         mode = str(mode)
         if mode == "chain" and self.component_sizes.size == 0:
             mode = "all"
-            self.status_bar.showMessage("Chain groups are still being prepared")
+            self.status_bar.showMessage(self._t("chain_preparing"))
 
         self.filter_mode = mode if mode in {"all", "chain", "atom"} else "atom"
         self.filter_mode_buttons[self.filter_mode].setChecked(True)
         self.filter_value_slider.blockSignals(True)
         if self.filter_mode == "all":
             self.filter_value_slider.setEnabled(False)
-            self.filter_value_label.setText("All atoms")
+            self.filter_value_label.setText(self._t("all_atoms"))
             self.filter_value_label.setEnabled(False)
-            self.filter_value_slider.setToolTip("All atoms are visible")
+            self.filter_value_slider.setToolTip(self._t("all_atoms_tooltip"))
         elif self.filter_mode == "atom":
             maximum = self.store.atom_count
             self.filter_value_slider.setRange(1, maximum)
@@ -693,10 +725,11 @@ class TrajPlayerWindow(MainWindowView):
 
     def _set_filter_value_control_mode(self, mode: str) -> None:
         chain_mode = mode == "chain"
+        atom_mode = mode == "atom"
         self.chain_selection_edit.setVisible(chain_mode)
         self.chain_selection_edit.setEnabled(chain_mode)
-        self.filter_value_slider.setVisible(not chain_mode)
-        self.filter_value_label.setVisible(not chain_mode)
+        self.filter_value_slider.setVisible(atom_mode)
+        self.filter_value_label.setVisible(atom_mode)
 
     def _set_chain_selection_invalid(self, invalid: bool) -> None:
         if bool(self.chain_selection_edit.property("invalid")) == bool(invalid):
@@ -709,12 +742,16 @@ class TrajPlayerWindow(MainWindowView):
 
     def update_filter_value_label(self) -> None:
         if self.filter_mode == "all":
-            self.filter_value_label.setText("All atoms")
+            self.filter_value_label.setText(self._t("all_atoms"))
             return
         value = self.filter_value_slider.value()
-        self.filter_value_label.setText(f"Atom {value}")
+        self.filter_value_label.setText(self._t("atom_value", value=value))
         self.filter_value_slider.setToolTip(
-            f"Atom {value} of {self.filter_value_slider.maximum()}"
+            self._t(
+                "atom_of",
+                value=value,
+                maximum=self.filter_value_slider.maximum(),
+            )
         )
 
     def schedule_visibility_filter(self, _value: int | None = None) -> None:
@@ -727,7 +764,7 @@ class TrajPlayerWindow(MainWindowView):
         visible_atoms: np.ndarray | None
         if mode == "all":
             visible_atoms = None
-            message = f"Showing all {self.store.atom_count} atoms"
+            message = self._t("showing_all", count=self.store.atom_count)
             unwrap_group_ids = None
             self._set_chain_selection_invalid(False)
         elif mode == "chain":
@@ -738,7 +775,7 @@ class TrajPlayerWindow(MainWindowView):
                 )
             except ChainSelectionError as exc:
                 self._set_chain_selection_invalid(True)
-                self.status_bar.showMessage(f"Invalid chain selection: {exc}")
+                self.status_bar.showMessage(self._t("invalid_chain", error=exc))
                 return
             self._set_chain_selection_invalid(False)
             self.selected_chains = chains
@@ -754,13 +791,16 @@ class TrajPlayerWindow(MainWindowView):
                 copy=False,
             )
             selection_text = format_chain_selection(chains)
-            noun = "chain" if len(chains) == 1 else "chains"
-            message = f"Showing {noun} {selection_text}: {len(visible_atoms)} atoms"
+            message = self._t(
+                "showing_chain" if len(chains) == 1 else "showing_chains",
+                selection=selection_text,
+                count=len(visible_atoms),
+            )
             unwrap_group_ids = self.component_ids
         else:
             atom_index = self.filter_value_slider.value() - 1
             visible_atoms = np.array([atom_index], dtype=np.int32)
-            message = f"Showing atom {atom_index + 1}"
+            message = self._t("showing_atom", value=atom_index + 1)
             unwrap_group_ids = None
             self._set_chain_selection_invalid(False)
         self.gl_view.set_visible_atoms(
@@ -778,7 +818,7 @@ class TrajPlayerWindow(MainWindowView):
         if store.metadata.get("synthetic"):
             self.bond_topology = empty_topology(BondSource.GENERATED)
             self.update_trajectory_info()
-            self.status_bar.showMessage("Synthetic benchmark loaded without bond inference")
+            self.status_bar.showMessage(self._t("synthetic_ready"))
             return
         if not self.infer_bonds_check.isChecked():
             self.bond_topology = empty_topology()
@@ -830,7 +870,7 @@ class TrajPlayerWindow(MainWindowView):
         thread.failed.connect(self.on_bonds_failed)
         thread.finished.connect(lambda thread=thread: self.on_bond_thread_finished(thread))
         self.bond_thread = thread
-        self.status_bar.showMessage("Inferring bonds in the background")
+        self.status_bar.showMessage(self._t("inferring_bonds"))
         thread.start()
 
     def stop_bond_inference(self, *, wait_ms: int) -> None:
@@ -861,8 +901,12 @@ class TrajPlayerWindow(MainWindowView):
         self.gl_view.set_bonds(topology.bonds)
         self.update_trajectory_info()
         self.status_bar.showMessage(
-            f"Bonds ready: {len(topology.bonds)} inferred from frame 1, "
-            f"{len(self.component_sizes)} components in {elapsed_ms:.0f} ms"
+            self._t(
+                "bonds_ready",
+                bonds=len(topology.bonds),
+                components=len(self.component_sizes),
+                elapsed=elapsed_ms,
+            )
         )
 
     def on_bonds_failed(self, generation: int, message: str) -> None:
@@ -929,6 +973,21 @@ class TrajPlayerWindow(MainWindowView):
         self.benchmark_memory_idle = process_memory_snapshot()
         self.gl_view.enable_benchmark_stats(finish_gpu=self.benchmark_finish_gpu)
         self.benchmark_started_s = time.perf_counter()
+        camera_spin_seconds = float(
+            self.benchmark_base_metrics.get("benchmark_camera_spin_seconds", 0.0)
+        )
+        if camera_spin_seconds > 0.0:
+            self.benchmark_camera_spin_deadline_s = (
+                self.benchmark_started_s + camera_spin_seconds
+            )
+            self.benchmark_camera_spin_complete = False
+            if self.streamer is not None:
+                self.streamer.set_playback_fps(0.0)
+            self.set_play_button_state(False)
+            self.benchmark_camera_timer.start()
+            self.on_benchmark_camera_tick()
+            self.benchmark_poll_timer.start()
+            return
         self.playback = PlaybackEngine(
             total_frames=self.store.frame_count,
             fps=self.TARGET_FPS,
@@ -941,11 +1000,34 @@ class TrajPlayerWindow(MainWindowView):
         self.schedule_next_render_tick()
         self.benchmark_poll_timer.start()
 
+    def on_benchmark_camera_tick(self) -> None:
+        if self.benchmark_output is None:
+            self.benchmark_camera_timer.stop()
+            return
+        if time.perf_counter() >= self.benchmark_camera_spin_deadline_s:
+            self.benchmark_camera_timer.stop()
+            self.benchmark_camera_spin_complete = True
+            return
+        self.gl_view.benchmark_rotate_camera(1.0)
+
     def check_benchmark_finished(self) -> None:
         if self.benchmark_output is None:
             return
         stats = self.gl_view.render_stats
-        if stats is not None and stats.summary()["frames"] >= self.benchmark_target_frames:
+        if stats is None:
+            return
+        summary = stats.summary()
+        camera_spin_seconds = float(
+            self.benchmark_base_metrics.get("benchmark_camera_spin_seconds", 0.0)
+        )
+        if camera_spin_seconds > 0.0:
+            if (
+                self.benchmark_camera_spin_complete
+                and summary["post_interaction_frame_ms_samples"] >= 1
+            ):
+                self.finish_benchmark(timed_out=False)
+            return
+        if summary["frames"] >= self.benchmark_target_frames:
             self.finish_benchmark(timed_out=False)
 
     def finish_benchmark_timeout(self) -> None:
@@ -957,6 +1039,7 @@ class TrajPlayerWindow(MainWindowView):
             return
         self.benchmark_poll_timer.stop()
         self.benchmark_warmup_timer.stop()
+        self.benchmark_camera_timer.stop()
         stats = self.gl_view.render_stats
         render_summary = stats.summary() if stats is not None else {}
         streamer_stats = (
@@ -1115,8 +1198,8 @@ class TrajPlayerWindow(MainWindowView):
         self.filter_value_slider.setValue(1)
         self.filter_value_slider.setEnabled(False)
         self.filter_value_slider.blockSignals(False)
-        self.filter_value_label.setText("All atoms")
-        self.filter_value_label.setFixedWidth(76)
+        self.filter_value_label.setText(self._t("all_atoms"))
+        self.filter_value_label.setMinimumWidth(48)
         self.filter_value_label.setEnabled(False)
         self.chain_selection_edit.blockSignals(True)
         self.chain_selection_edit.setText("1")
@@ -1149,6 +1232,7 @@ class TrajPlayerWindow(MainWindowView):
         self.playback_speed_label.setEnabled(enabled)
         self.playback_speed_slider.setEnabled(enabled)
         self.playback_speed_value_label.setEnabled(enabled)
+        self.transport_speed_label.setEnabled(enabled)
 
     def on_render_tick(self) -> None:
         if self.store is None or self.streamer is None:
@@ -1343,6 +1427,7 @@ class TrajPlayerWindow(MainWindowView):
 
     def on_playback_speed_changed(self, value: int) -> None:
         self.playback_speed_value_label.setText(f"{int(value)} FPS")
+        self.transport_speed_label.setText(f"{int(value)} FPS")
         if (
             self.benchmark_output is not None
             or self.store is None
@@ -1364,9 +1449,9 @@ class TrajPlayerWindow(MainWindowView):
         if commands is not None:
             commands.set_playing(playing)
         if playing:
-            self.play_button.setAccessibleName("Pause trajectory")
+            self.play_button.setAccessibleName(self._t("pause_accessible"))
         else:
-            self.play_button.setAccessibleName("Play trajectory")
+            self.play_button.setAccessibleName(self._t("play_accessible"))
 
     def on_frame_slider_changed(self, value: int) -> None:
         if self.internal_slider_change or self.store is None:
@@ -1482,17 +1567,19 @@ class TrajPlayerWindow(MainWindowView):
         total = self.store.frame_count if self.store is not None else 0
         current = self.current_frame + 1 if total else 0
         suffix = "+" if self.store is not None and not self.store.frame_count_is_final else ""
-        self.frame_label.setText(f"Frame {current} / {total}{suffix}")
+        self.frame_label.setText(
+            self._t("frame", current=current, total=total, suffix=suffix)
+        )
 
     def show_error(self, message: str) -> None:
         self.stop_playback()
         print(f"[error] {message}", flush=True)
         if self.automation_mode:
-            self.status_bar.showMessage("Error")
+            self.status_bar.showMessage(self._t("error"))
             self.error_reported.emit(message)
             return
         QMessageBox.critical(self, "TrajPlayer", message)
-        self.status_bar.showMessage("Error")
+        self.status_bar.showMessage(self._t("error"))
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._pending_open_source = None
@@ -1540,20 +1627,19 @@ def main() -> None:
         return
     if cli_args.native_smoke:
         from trajplayer.trajcore import (
-            NATIVE_AVAILABLE,
-            NATIVE_DEPTH_ORDER_AVAILABLE,
+            NATIVE_FULL_AVAILABLE,
             NATIVE_IMPORT_ERROR,
         )
 
-        if not NATIVE_AVAILABLE or not NATIVE_DEPTH_ORDER_AVAILABLE:
+        if not NATIVE_FULL_AVAILABLE:
             print(
-                "[native-smoke] trajplayer._trajcore or its depth-order entry "
+                "[native-smoke] trajplayer._trajcore or an alpha.9 hot-path entry "
                 f"is unavailable: {NATIVE_IMPORT_ERROR!r}",
                 flush=True,
             )
             raise SystemExit(2)
         print(
-            "[native-smoke] trajplayer._trajcore depth ordering is available",
+            "[native-smoke] all trajplayer._trajcore alpha.9 hot paths are available",
             flush=True,
         )
         return
@@ -1651,6 +1737,7 @@ def prepare_benchmark_store(args: CliArgs) -> tuple[BinaryTrajectoryStore, Path,
         "finish_gpu": args.benchmark_finish_gpu,
         "benchmark_bonds": args.benchmark_bonds,
         "benchmark_mode": args.benchmark_mode,
+        "benchmark_camera_spin_seconds": args.benchmark_camera_spin_seconds,
     }
 
     create_s = 0.0

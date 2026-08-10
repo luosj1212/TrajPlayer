@@ -23,6 +23,8 @@ class WindowCommands:
         reset_camera: Callable[[], None],
     ) -> None:
         style = window.style()
+        self._translate = lambda key: key
+        self._playing = False
         self.open_file = self._action(
             window,
             text="Open",
@@ -105,22 +107,38 @@ class WindowCommands:
         self.reset_camera.setEnabled(bool(enabled))
 
     def set_playing(self, playing: bool) -> None:
+        self._playing = bool(playing)
         if playing:
-            self.play.setText("Pause")
-            self.play.setToolTip("Pause (Space)")
+            self.play.setText(self._translate("pause"))
+            self.play.setToolTip(self._translate("pause_tooltip"))
             self.play.setIcon(
                 self.play.parent().style().standardIcon(
                     QStyle.StandardPixmap.SP_MediaPause
                 )
             )
         else:
-            self.play.setText("Play")
-            self.play.setToolTip("Play (Space)")
+            self.play.setText(self._translate("play"))
+            self.play.setToolTip(self._translate("play_tooltip"))
             self.play.setIcon(
                 self.play.parent().style().standardIcon(
                     QStyle.StandardPixmap.SP_MediaPlay
                 )
             )
+
+    def retranslate(self, translate) -> None:
+        self._translate = translate
+        for action, text_key, tooltip_key in (
+            (self.open_file, "open", "open_tooltip"),
+            (self.previous_frame, "previous", "previous_tooltip"),
+            (self.next_frame, "next", "next_tooltip"),
+            (self.first_frame, "first_frame", "first_frame"),
+            (self.last_frame, "last_frame", "last_frame"),
+            (self.reset_camera, "reset", "reset_tooltip"),
+        ):
+            action.setText(translate(text_key))
+            action.setToolTip(translate(tooltip_key))
+            action.setStatusTip(translate(tooltip_key))
+        self.set_playing(self._playing)
 
     @staticmethod
     def _action(

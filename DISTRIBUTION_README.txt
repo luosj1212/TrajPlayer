@@ -1,4 +1,4 @@
-TrajPlayer v0.1.0-alpha.8 distribution
+TrajPlayer v0.1.0-alpha.9 distribution
 
 Windows
 1. Extract the entire TrajPlayer folder from the zip archive.
@@ -45,6 +45,7 @@ Gromacs trajectories
 - When an XTC/TRR file has a same-named GRO file beside it, opening the trajectory alone also works.
 
 Display
+- Use the top-right controls button to show or hide the responsive inspector. Choose Chinese or English under Interface.
 - Choose Ball-stick, Ball, or Bond from the representation control.
 - Atom and bond sizes are independently adjustable with sliders. At 100%, Ball-stick uses 0.25x van der Waals atom radii and 0.20 A sticks; Ball uses full van der Waals radii.
 - Use All, Chain, and Atom to control visibility. Chain accepts entries such as 1,3-5; Atom uses the adjacent slider.
@@ -54,7 +55,7 @@ Display
 Performance
 - Traj, XTC, and TRR trajectories decode the requested directional window directly instead of creating a full float32 sidecar.
 - RAM prefetch is selected automatically from frame size, available memory, renderer/topology reservations, read latency, and cache-hit behavior.
-- XYZ and extXYZ show frame 1 first, then build a reusable frame-offset index in the background.
+- Common XYZ and extXYZ rows are parsed natively into the frame cache. Frame 1 appears first while a reusable frame-offset index is built in the background.
 - Chemfiles provides structure and XTC/TRR decoding; portable builds do not bundle SciPy or MDAnalysis.
 - Hybrid-GPU Windows laptops automatically request the NVIDIA high-performance GPU when available.
 - Keep current graphics drivers installed; TrajPlayer falls back to the available OpenGL 3.3 GPU.

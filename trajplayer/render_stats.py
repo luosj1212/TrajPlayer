@@ -12,6 +12,10 @@ class RenderStats:
     paint_ms: RollingLatency = field(default_factory=RollingLatency)
     upload_ms: RollingLatency = field(default_factory=RollingLatency)
     depth_sort_ms: RollingLatency = field(default_factory=RollingLatency)
+    depth_order_ms: RollingLatency = field(default_factory=RollingLatency)
+    array_rebuild_ms: RollingLatency = field(default_factory=RollingLatency)
+    static_upload_ms: RollingLatency = field(default_factory=RollingLatency)
+    post_interaction_frame_ms: RollingLatency = field(default_factory=RollingLatency)
     timestamps_s: RollingLatency = field(default_factory=RollingLatency)
     _frames: int = 0
     _paint_ms_total: float = 0.0
@@ -30,6 +34,10 @@ class RenderStats:
         draw_calls: int,
         timestamp_s: float | None = None,
         depth_sort_ms: float = 0.0,
+        depth_order_ms: float = 0.0,
+        array_rebuild_ms: float = 0.0,
+        static_upload_ms: float = 0.0,
+        post_interaction_frame_ms: float | None = None,
         renderer_copy_bytes: int = 0,
     ) -> None:
         paint = max(0.0, float(paint_ms))
@@ -37,7 +45,18 @@ class RenderStats:
         calls = max(0, int(draw_calls))
         self.paint_ms.record(paint)
         self.upload_ms.record(upload)
-        self.depth_sort_ms.record(depth_sort_ms)
+        if max(
+            float(depth_sort_ms),
+            float(depth_order_ms),
+            float(array_rebuild_ms),
+            float(static_upload_ms),
+        ) > 0.0:
+            self.depth_sort_ms.record(depth_sort_ms)
+            self.depth_order_ms.record(depth_order_ms)
+            self.array_rebuild_ms.record(array_rebuild_ms)
+            self.static_upload_ms.record(static_upload_ms)
+        if post_interaction_frame_ms is not None:
+            self.post_interaction_frame_ms.record(post_interaction_frame_ms)
         if timestamp_s is not None:
             self.timestamps_s.record(timestamp_s)
         self._frames += 1
@@ -71,6 +90,30 @@ class RenderStats:
             "depth_sort_ms_p50": self.depth_sort_ms.percentile(50.0),
             "depth_sort_ms_p95": self.depth_sort_ms.percentile(95.0),
             "depth_sort_ms_p99": self.depth_sort_ms.percentile(99.0),
+            "depth_sort_ms_samples": self.depth_sort_ms.total_count,
+            "depth_order_ms_p50": self.depth_order_ms.percentile(50.0),
+            "depth_order_ms_p95": self.depth_order_ms.percentile(95.0),
+            "depth_order_ms_p99": self.depth_order_ms.percentile(99.0),
+            "array_rebuild_ms_p50": self.array_rebuild_ms.percentile(50.0),
+            "array_rebuild_ms_p95": self.array_rebuild_ms.percentile(95.0),
+            "array_rebuild_ms_p99": self.array_rebuild_ms.percentile(99.0),
+            "static_upload_ms_p50": self.static_upload_ms.percentile(50.0),
+            "static_upload_ms_p95": self.static_upload_ms.percentile(95.0),
+            "static_upload_ms_p99": self.static_upload_ms.percentile(99.0),
+            "static_upload_ms_max": self.static_upload_ms.maximum(),
+            "post_interaction_frame_ms_samples": (
+                self.post_interaction_frame_ms.total_count
+            ),
+            "post_interaction_frame_ms_p50": (
+                self.post_interaction_frame_ms.percentile(50.0)
+            ),
+            "post_interaction_frame_ms_p95": (
+                self.post_interaction_frame_ms.percentile(95.0)
+            ),
+            "post_interaction_frame_ms_p99": (
+                self.post_interaction_frame_ms.percentile(99.0)
+            ),
+            "post_interaction_frame_ms_max": self.post_interaction_frame_ms.maximum(),
             "renderer_full_frame_copy_bytes": self._renderer_copy_bytes,
             "renderer_full_frame_copy_bytes_per_frame": (
                 self._renderer_copy_bytes / self._frames if self._frames else 0.0

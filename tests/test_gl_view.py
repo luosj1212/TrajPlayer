@@ -24,8 +24,14 @@ class GlViewDefaultsTests(unittest.TestCase):
     def test_shader_preserves_physical_projected_atom_radius(self) -> None:
         self.assertIn("gl_VertexID", gl_view.VERTEX_SHADER)
         self.assertIn("layout(location = 1) in float a_atom_index", gl_view.VERTEX_SHADER)
-        self.assertIn("layout(location = 8) in float a_unwrap_anchor_index", gl_view.VERTEX_SHADER)
+        self.assertNotIn("a_unwrap_anchor_index", gl_view.VERTEX_SHADER)
         self.assertIn("uniform samplerBuffer u_positions", gl_view.VERTEX_SHADER)
+        self.assertIn("uniform samplerBuffer u_atom_radii", gl_view.VERTEX_SHADER)
+        self.assertIn("uniform samplerBuffer u_atom_colors", gl_view.VERTEX_SHADER)
+        self.assertIn("uniform samplerBuffer u_atom_anchors", gl_view.VERTEX_SHADER)
+        self.assertIn("texelFetch(u_atom_radii, atom_index)", gl_view.VERTEX_SHADER)
+        self.assertIn("texelFetch(u_atom_colors, atom_index)", gl_view.VERTEX_SHADER)
+        self.assertIn("texelFetch(u_atom_anchors, atom_index)", gl_view.VERTEX_SHADER)
         self.assertIn("uniform float u_atom_size_scale", gl_view.VERTEX_SHADER)
         self.assertNotIn("uniform int u_unwrap_anchor_index", gl_view.VERTEX_SHADER)
         self.assertNotIn("u_unwrap_display_anchor", gl_view.VERTEX_SHADER)
@@ -233,6 +239,7 @@ class GlViewDefaultsTests(unittest.TestCase):
 
     def test_frame_upload_uses_three_stream_buffers_inside_paint(self) -> None:
         self.assertEqual(gl_view.POSITION_BUFFER_COUNT, 3)
+        self.assertEqual(gl_view.ATOM_PERMUTATION_BUFFER_COUNT, 3)
         self.assertIn("_upload_frame_buffers", gl_view.MoleculeGLWidget.paintGL.__code__.co_names)
         self.assertNotIn("makeCurrent", gl_view.MoleculeGLWidget.set_frame.__code__.co_names)
         self.assertNotIn("doneCurrent", gl_view.MoleculeGLWidget.set_frame.__code__.co_names)
@@ -257,6 +264,33 @@ class GlViewDefaultsTests(unittest.TestCase):
         self.assertNotIn("_depth_order_dirty", move_names)
         self.assertGreaterEqual(gl_view.DEPTH_SORT_IDLE_MS, 50)
         self.assertLessEqual(gl_view.DEPTH_SORT_IDLE_MS, 100)
+        benchmark_names = gl_view.MoleculeGLWidget.benchmark_rotate_camera.__code__.co_names
+        self.assertIn("_depth_sort_timer", benchmark_names)
+        self.assertIn("start", benchmark_names)
+        self.assertIn("update", benchmark_names)
+        refresh_names = (
+            gl_view.MoleculeGLWidget._refresh_depth_order_after_interaction.__code__.co_names
+        )
+        self.assertIn("_post_interaction_measure_pending", refresh_names)
+
+    def test_post_interaction_telemetry_splits_sort_rebuild_and_upload(self) -> None:
+        paint_names = gl_view.MoleculeGLWidget.paintGL.__code__.co_names
+        rebuild_names = (
+            gl_view.MoleculeGLWidget._rebuild_render_atom_arrays.__code__.co_names
+        )
+
+        self.assertIn("_last_depth_order_ms", rebuild_names)
+        self.assertIn("_last_array_rebuild_ms", rebuild_names)
+        self.assertIn("_last_static_upload_ms", paint_names)
+        self.assertIn(
+            "post_interaction_frame_ms",
+            gl_view.MoleculeGLWidget.paintGL.__code__.co_varnames,
+        )
+        self.assertIn("_upload_atom_permutation_buffer", paint_names)
+        self.assertNotIn("_upload_static_buffers", paint_names)
+        self.assertNotIn("_visible_radii", rebuild_names)
+        self.assertNotIn("_visible_colors", rebuild_names)
+        self.assertIn("coarse_position_depth_order", rebuild_names)
 
     def test_render_modes_switch_draw_paths_without_per_frame_geometry_rebuilds(self) -> None:
         self.assertEqual(

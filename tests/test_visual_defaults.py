@@ -45,11 +45,14 @@ class VisualDefaultTests(unittest.TestCase):
     def test_bond_inference_source_is_visible_and_can_be_disabled(self) -> None:
         source = WINDOW_SOURCE
 
-        self.assertIn('self.infer_bonds_check = QCheckBox("Infer bonds")', source)
+        self.assertIn("self.infer_bonds_check = QCheckBox()", source)
+        self.assertIn('"infer_bonds": {"en": "Infer bonds"', source)
+        self.assertIn("layout.addWidget(self.advanced_toggle)", source)
+        self.assertIn("layout.addWidget(self.advanced_content)", source)
         self.assertIn("self.infer_bonds_check.toggled.connect", source)
         self.assertIn("def on_infer_bonds_toggled", source)
-        self.assertIn("self.bond_topology.description", source)
-        self.assertIn("inferred from frame 1", source)
+        self.assertIn("self.bond_topology = topology", source)
+        self.assertIn('"bonds_ready",', source)
 
     def test_open_shortcut_uses_the_platform_standard_binding(self) -> None:
         source = COMMAND_SOURCE
@@ -74,14 +77,15 @@ class VisualDefaultTests(unittest.TestCase):
     def test_window_exposes_gpu_ball_stick_ball_and_bond_size_controls(self) -> None:
         source = WINDOW_SOURCE
 
-        self.assertIn('self.render_mode_combo.addItem("Ball-stick", "ball_stick")', source)
-        self.assertIn('self.render_mode_combo.addItem("Ball", "ball")', source)
-        self.assertIn('self.render_mode_combo.addItem("Bond", "bond")', source)
-        self.assertIn('self.atom_size_label = QLabel("Atom")', source)
-        self.assertIn('self.bond_size_label = QLabel("Bond")', source)
-        self.assertIn("self.atom_size_slider.setValue(100)", source)
-        self.assertIn("self.bond_size_slider.setValue(100)", source)
-        self.assertIn('self.atom_size_value_label = QLabel("100%")', source)
+        self.assertIn('self.render_mode_combo.addItem("", "ball_stick")', source)
+        self.assertIn('self.render_mode_combo.addItem("", "ball")', source)
+        self.assertIn('self.render_mode_combo.addItem("", "bond")', source)
+        self.assertIn('"ball_stick": {"en": "Ball-stick"', source)
+        self.assertIn("self.atom_size_label = self._control_label()", source)
+        self.assertIn("self.bond_size_label = self._control_label()", source)
+        self.assertIn("self._size_slider(10, 250, 100, 5, 25)", source)
+        self.assertIn("self._size_slider(10, 300, 100, 5, 25)", source)
+        self.assertIn('self.atom_size_value_label = self._value_label("100%")', source)
         self.assertNotIn('self.atom_size_spin.setPrefix("Atom ")', source)
         self.assertNotIn('self.bond_size_spin.setPrefix("Bond ")', source)
         self.assertIn("self.gl_view.set_atom_size_scale", source)
@@ -90,7 +94,8 @@ class VisualDefaultTests(unittest.TestCase):
     def test_window_exposes_box_toggle_when_cells_are_available(self) -> None:
         source = WINDOW_SOURCE
 
-        self.assertIn('QCheckBox("Box")', source)
+        self.assertIn("self.box_check = QCheckBox()", source)
+        self.assertIn('"box": {"en": "Periodic box"', source)
         self.assertIn("self.box_check.toggled.connect", source)
         self.assertIn("self.gl_view.set_box_enabled", source)
         self.assertIn("cell=lease.cell", source)
@@ -122,9 +127,9 @@ class VisualDefaultTests(unittest.TestCase):
     def test_transport_ui_uses_compact_icon_controls_and_60fps_scrubbing(self) -> None:
         source = WINDOW_SOURCE
 
-        self.assertIn("self.prev_button = QToolButton()", source)
-        self.assertIn("self.play_button = QToolButton()", source)
-        self.assertIn("self.next_button = QToolButton()", source)
+        self.assertIn("self.prev_button = self._transport_button(", source)
+        self.assertIn("self.play_button = self._transport_button(", source)
+        self.assertIn("self.next_button = self._transport_button(", source)
         self.assertIn("SP_MediaPlay", source)
         self.assertIn("SP_MediaPause", source)
         self.assertIn("SCRUB_PREVIEW_FPS = 60.0", source)
@@ -136,8 +141,8 @@ class VisualDefaultTests(unittest.TestCase):
         app_source = WINDOW_SOURCE
         engine_source = Path("trajplayer/playback.py").read_text(encoding="utf-8")
 
-        self.assertIn("self.playback_speed_slider.setRange(1, int(self.TARGET_FPS))", app_source)
-        self.assertIn("self.playback_speed_slider.setValue(int(self.TARGET_FPS))", app_source)
+        self.assertIn("self.playback_speed_slider = self._size_slider(", app_source)
+        self.assertIn("int(self.TARGET_FPS),\n            int(self.TARGET_FPS),", app_source)
         self.assertIn("def on_playback_speed_changed", app_source)
         self.assertIn("fps=float(self.playback_speed_slider.value())", app_source)
         self.assertIn("self.streamer.set_playback_fps", app_source)
@@ -152,9 +157,11 @@ class VisualDefaultTests(unittest.TestCase):
         source = WINDOW_SOURCE
 
         self.assertIn("self.filter_mode_group = QButtonGroup(self)", source)
-        self.assertIn('(("All", "all", 38), ("Chain", "chain", 52), ("Atom", "atom", 46))', source)
+        self.assertIn('for mode in ("all", "chain", "atom"):', source)
+        self.assertIn('button.setText(self._t(mode))', source)
         self.assertIn("self.filter_value_slider = QSlider", source)
-        self.assertIn('self.filter_value_label = QLabel("All atoms")', source)
+        self.assertIn('self.filter_value_label = self._value_label("")', source)
+        self.assertIn('"all_atoms": {"en": "All atoms"', source)
         self.assertIn('self.chain_selection_edit = QLineEdit("1")', source)
         self.assertIn('self.chain_selection_edit.setPlaceholderText("1,3-5")', source)
         self.assertIn("parse_chain_selection", source)
@@ -166,6 +173,18 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn("def apply_visibility_filter(self) -> None:", source)
         self.assertIn("self.gl_view.set_visible_atoms", source)
         self.assertIn("connected_components", WORKER_SOURCE)
+
+    def test_window_uses_responsive_inspector_and_runtime_i18n(self) -> None:
+        source = UI_SOURCE
+
+        self.assertIn("self.content_splitter = QSplitter", source)
+        self.assertIn('self.inspector_scroll.setObjectName("inspectorScroll")', source)
+        self.assertIn("RESPONSIVE_INSPECTOR_WIDTH = 920", source)
+        self.assertIn("def resizeEvent", source)
+        self.assertIn("self.language_combo.addItem(\"中文\", \"zh\")", source)
+        self.assertIn("QSettings(\"TrajPlayer\", \"TrajPlayer\")", source)
+        self.assertIn("def retranslate_ui", source)
+        self.assertNotIn("setFixedWidth", source)
 
 
 if __name__ == "__main__":

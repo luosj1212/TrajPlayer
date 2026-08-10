@@ -16,7 +16,74 @@ else:
 
 NATIVE_AVAILABLE = _native is not None
 NATIVE_DEPTH_ORDER_AVAILABLE = _native is not None and hasattr(_native, "coarse_depth_order")
+NATIVE_POSITION_DEPTH_ORDER_AVAILABLE = _native is not None and hasattr(
+    _native,
+    "coarse_position_depth_order",
+)
+NATIVE_XYZ_READ_AVAILABLE = _native is not None and hasattr(_native, "xyz_read_frame_into")
+NATIVE_VALENCE_SELECTION_AVAILABLE = _native is not None and hasattr(
+    _native,
+    "select_valence_bonds",
+)
+NATIVE_CONNECTED_COMPONENTS_AVAILABLE = _native is not None and hasattr(
+    _native,
+    "connected_components",
+)
+NATIVE_CANDIDATE_PAIRS_AVAILABLE = _native is not None and hasattr(
+    _native,
+    "candidate_pairs",
+)
+NATIVE_FULL_AVAILABLE = all(
+    (
+        NATIVE_AVAILABLE,
+        NATIVE_DEPTH_ORDER_AVAILABLE,
+        NATIVE_POSITION_DEPTH_ORDER_AVAILABLE,
+        NATIVE_XYZ_READ_AVAILABLE,
+        NATIVE_VALENCE_SELECTION_AVAILABLE,
+        NATIVE_CONNECTED_COMPONENTS_AVAILABLE,
+        NATIVE_CANDIDATE_PAIRS_AVAILABLE,
+    )
+)
 DEPTH_BIN_COUNT = 256
+
+
+def xyz_read_frame_into(
+    source,
+    *,
+    data_offset: int,
+    data_end: int,
+    positions: np.ndarray,
+    identity_column: int,
+    identity_is_atomic_number: bool,
+    position_columns: tuple[int, int, int],
+    expected_columns: int,
+    expected_atom_numbers: np.ndarray,
+) -> bool:
+    """Parse XYZ atom rows directly into a caller-owned contiguous frame buffer."""
+
+    if not NATIVE_XYZ_READ_AVAILABLE:
+        return False
+    layout = np.asarray(
+        [
+            int(identity_column),
+            int(position_columns[0]),
+            int(position_columns[1]),
+            int(position_columns[2]),
+            int(expected_columns),
+        ],
+        dtype=np.int32,
+    )
+    expected = np.ascontiguousarray(expected_atom_numbers, dtype=np.uint16)
+    _native.xyz_read_frame_into(
+        source,
+        int(data_offset),
+        int(data_end),
+        positions,
+        layout,
+        expected,
+        bool(identity_is_atomic_number),
+    )
+    return True
 
 
 def coarse_depth_order(view_depth: np.ndarray) -> np.ndarray:
@@ -28,6 +95,26 @@ def coarse_depth_order(view_depth: np.ndarray) -> np.ndarray:
     if _native is not None and hasattr(_native, "coarse_depth_order"):
         return np.ascontiguousarray(_native.coarse_depth_order(depth), dtype=np.int64)
     return _python_coarse_depth_order(depth)
+
+
+def coarse_position_depth_order(
+    positions: np.ndarray,
+    camera_forward: np.ndarray,
+) -> np.ndarray:
+    """Project canonical positions and return the visual coarse depth order."""
+
+    frame = np.ascontiguousarray(positions, dtype=np.float32)
+    forward = np.ascontiguousarray(camera_forward, dtype=np.float32)
+    if frame.ndim != 2 or frame.shape[1] != 3:
+        raise ValueError("positions must have shape (N, 3)")
+    if forward.shape != (3,):
+        raise ValueError("camera_forward must have shape (3,)")
+    if NATIVE_POSITION_DEPTH_ORDER_AVAILABLE:
+        return np.ascontiguousarray(
+            _native.coarse_position_depth_order(frame, forward),
+            dtype=np.int64,
+        )
+    return coarse_depth_order(frame @ forward)
 
 
 def _python_coarse_depth_order(depth: np.ndarray) -> np.ndarray:
@@ -85,6 +172,77 @@ def candidate_pairs(
         float(maximum_cutoff),
         cell=matrix,
     )
+
+
+def select_valence_bonds(
+    distance2: np.ndarray,
+    left: np.ndarray,
+    right: np.ndarray,
+    caps: np.ndarray,
+) -> np.ndarray:
+    """Select shortest candidate bonds while respecting per-atom valence caps."""
+
+    distances = np.ascontiguousarray(distance2, dtype=np.float32)
+    low = np.ascontiguousarray(left, dtype=np.int32)
+    high = np.ascontiguousarray(right, dtype=np.int32)
+    limits = np.ascontiguousarray(caps, dtype=np.uint8)
+    _validate_valence_selection_inputs(distances, low, high, limits)
+    if NATIVE_VALENCE_SELECTION_AVAILABLE:
+        return np.ascontiguousarray(
+            _native.select_valence_bonds(distances, low, high, limits),
+            dtype=np.int32,
+        )
+    return _python_select_valence_bonds(distances, low, high, limits)
+
+
+def _validate_valence_selection_inputs(
+    distance2: np.ndarray,
+    left: np.ndarray,
+    right: np.ndarray,
+    caps: np.ndarray,
+) -> None:
+    if distance2.ndim != 1 or left.ndim != 1 or right.ndim != 1 or caps.ndim != 1:
+        raise ValueError("distance2, left, right, and caps must be one-dimensional")
+    if distance2.shape != left.shape or distance2.shape != right.shape:
+        raise ValueError("candidate arrays must have matching lengths")
+    if not np.all(np.isfinite(distance2)):
+        raise ValueError("candidate distances must be finite")
+    if left.size and (
+        int(np.min(left)) < 0
+        or int(np.max(left)) >= caps.size
+        or int(np.min(right)) < 0
+        or int(np.max(right)) >= caps.size
+    ):
+        raise ValueError("candidate atom indices must be in range")
+    if np.any(left == right):
+        raise ValueError("candidate atom indices must be distinct")
+
+
+def _python_select_valence_bonds(
+    distance2: np.ndarray,
+    left: np.ndarray,
+    right: np.ndarray,
+    caps: np.ndarray,
+) -> np.ndarray:
+    if distance2.size == 0 or not np.any(caps):
+        return np.empty((0, 2), dtype=np.int32)
+    degrees = np.zeros(caps.shape, dtype=np.uint16)
+    maximum = min(int(distance2.size), int(np.sum(caps, dtype=np.int64) // 2))
+    bonds = np.empty((maximum, 2), dtype=np.int32)
+    count = 0
+    order = np.lexsort((right, left, distance2))
+    for candidate in order:
+        i = int(left[candidate])
+        j = int(right[candidate])
+        if degrees[i] >= caps[i] or degrees[j] >= caps[j]:
+            continue
+        degrees[i] += 1
+        degrees[j] += 1
+        bonds[count] = (i, j)
+        count += 1
+        if count == maximum:
+            break
+    return np.ascontiguousarray(bonds[:count], dtype=np.int32)
 
 
 def _python_connected_components(

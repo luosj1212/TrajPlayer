@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 from ase import Atoms
@@ -9,11 +10,33 @@ from chemfiles import Frame, Trajectory, UnitCell
 
 from trajplayer.ase_cache import build_cache_from_source, open_valid_cache
 from trajplayer.gromacs_cache import inspect_gromacs_source
+from trajplayer.gromacs_reader import ChemfilesGromacsReader
 from trajplayer.random_access_cache import open_random_access_session, write_reader_frame
 from trajplayer.trajectory_source import resolve_trajectory_source
 
 
 class GromacsCacheTests(unittest.TestCase):
+    def test_gromacs_reader_reuses_the_frame_decoded_during_initialization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            topology = root / "water.gro"
+            trajectory = root / "water.xtc"
+            self._write_gromacs_pair(topology, trajectory)
+
+            reader = ChemfilesGromacsReader(trajectory, expected_atom_count=3)
+            try:
+                with patch.object(
+                    reader,
+                    "_decode_frame",
+                    wraps=reader._decode_frame,
+                ) as decode:
+                    reader.read_frame(0)
+                    self.assertEqual(decode.call_count, 0)
+                    reader.read_frame(0)
+                    self.assertEqual(decode.call_count, 1)
+            finally:
+                reader.close()
+
     def test_xtc_and_trr_stream_into_float32_store(self) -> None:
         for suffix in (".xtc", ".trr"):
             with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as tmp:

@@ -19,6 +19,8 @@ dist/
 *.zip
 *.tar.gz
 *.sha256
+trajplayer/_trajcore*.pyd
+trajplayer/_trajcore*.so
 
 # Trajectory data and generated sidecar caches
 *.tpdata/
@@ -31,6 +33,7 @@ dist/
 
 # Local benchmarks, logs, and visual checks
 /artifacts/
+/smoke-fixtures/
 benchmark-*.json
 benchmark-*.png
 *-check.json

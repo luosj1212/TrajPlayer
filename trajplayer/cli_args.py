@@ -24,6 +24,7 @@ class CliArgs:
     benchmark_finish_gpu: bool = False
     benchmark_bonds: bool = False
     benchmark_mode: str = "ball_stick"
+    benchmark_camera_spin_seconds: float = 0.0
 
 
 def parse_cli_args(argv: list[str]) -> CliArgs:
@@ -45,6 +46,7 @@ def parse_cli_args(argv: list[str]) -> CliArgs:
     benchmark_finish_gpu = False
     benchmark_bonds = False
     benchmark_mode = "ball_stick"
+    benchmark_camera_spin_seconds = 0.0
 
     for arg in argv:
         if arg == "--startup-smoke":
@@ -81,6 +83,8 @@ def parse_cli_args(argv: list[str]) -> CliArgs:
             benchmark_bonds = True
         elif arg.startswith("--benchmark-mode="):
             benchmark_mode = arg.split("=", 1)[1].strip().lower()
+        elif arg.startswith("--benchmark-camera-spin-seconds="):
+            benchmark_camera_spin_seconds = max(0.0, float(arg.split("=", 1)[1]))
         else:
             paths.append(Path(arg).expanduser())
 
@@ -103,4 +107,5 @@ def parse_cli_args(argv: list[str]) -> CliArgs:
         benchmark_finish_gpu=benchmark_finish_gpu,
         benchmark_bonds=benchmark_bonds,
         benchmark_mode=benchmark_mode,
+        benchmark_camera_spin_seconds=benchmark_camera_spin_seconds,
     )

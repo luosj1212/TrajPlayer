@@ -25,6 +25,7 @@ class CliArgsTests(unittest.TestCase):
                 "--benchmark-finish-gpu",
                 "--benchmark-bonds",
                 "--benchmark-mode=bond",
+                "--benchmark-camera-spin-seconds=5",
                 "C:/tmp/source.traj",
             ]
         )
@@ -46,6 +47,7 @@ class CliArgsTests(unittest.TestCase):
         self.assertTrue(args.benchmark_finish_gpu)
         self.assertTrue(args.benchmark_bonds)
         self.assertEqual(args.benchmark_mode, "bond")
+        self.assertEqual(args.benchmark_camera_spin_seconds, 5.0)
         self.assertEqual(args.paths, [Path("C:/tmp/source.traj")])
 
 

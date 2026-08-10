@@ -50,6 +50,10 @@ class BenchmarkToolTests(unittest.TestCase):
                 draw_calls=1,
                 timestamp_s=10.0 + index / 60.0,
                 depth_sort_ms=float(index),
+                depth_order_ms=float(index) * 0.25,
+                array_rebuild_ms=float(index) * 0.5,
+                static_upload_ms=float(index) * 0.75,
+                post_interaction_frame_ms=12.5 if index == 3 else None,
             )
 
         summary = stats.summary()
@@ -63,6 +67,11 @@ class BenchmarkToolTests(unittest.TestCase):
         self.assertEqual(summary["upload_ms_p95"], 1.5)
         self.assertEqual(summary["upload_ms_p99"], 1.5)
         self.assertEqual(summary["depth_sort_ms_p95"], 3.0)
+        self.assertEqual(summary["depth_order_ms_p95"], 0.75)
+        self.assertEqual(summary["array_rebuild_ms_p95"], 1.5)
+        self.assertEqual(summary["static_upload_ms_p95"], 2.25)
+        self.assertEqual(summary["post_interaction_frame_ms_samples"], 1)
+        self.assertEqual(summary["post_interaction_frame_ms_p95"], 12.5)
         self.assertEqual(summary["renderer_full_frame_copy_bytes"], 0)
         self.assertEqual(summary["draw_calls_max"], 1)
         self.assertTrue(summary["single_draw_call_per_frame"])
@@ -95,6 +104,7 @@ class BenchmarkToolTests(unittest.TestCase):
         self.assertEqual(summary["frames"], 5000)
         self.assertEqual(stats.paint_ms.sample_count, 4096)
         self.assertEqual(stats.timestamps_s.sample_count, 4096)
+        self.assertEqual(stats.post_interaction_frame_ms.sample_count, 0)
         self.assertAlmostEqual(summary["cadence_fps"], 60.0)
 
     def test_process_memory_snapshot_reports_current_process(self) -> None:

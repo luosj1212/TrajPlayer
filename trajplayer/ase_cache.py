@@ -130,10 +130,11 @@ def build_cache_from_ase(
         for frame_index in range(summary.frame_count):
             if cancel_event is not None and cancel_event.is_set():
                 raise ConversionCancelled(f"Cancelled conversion for {source_path}")
-            positions, cell = direct.read_frame_arrays(frame_index)
-            store.positions[frame_index, :, :] = positions
-            if store.cells is not None:
-                store.cells[frame_index, :, :] = 0.0 if cell is None else cell
+            direct.read_frame_into(
+                frame_index,
+                store.positions[frame_index],
+                None if store.cells is None else store.cells[frame_index],
+            )
             store.mark_frame_available(frame_index + 1)
             if frame_index == 0 and preview_callback is not None:
                 store.flush()

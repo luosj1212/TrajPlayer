@@ -81,6 +81,21 @@ Benchmark the native million-atom depth-order path independently with:
 python scripts/bench_depth_order.py --atoms 1000000 --repeat 9 --require-native
 ```
 
+Measure common XYZ/extXYZ row parsing and greedy valence selection without the
+UI or renderer:
+
+```bash
+python scripts/bench_xyz_parser.py --atoms 1000000 --repeat 3
+python scripts/bench_valence_selection.py --atoms 200000 \
+  --candidates 1000000 --repeats 3
+```
+
+To expose the deferred million-atom camera-stop work, add
+`--benchmark-camera-spin-seconds=5` to the synthetic benchmark. The report then
+separates depth ordering, CPU array rebuild, static permutation upload, and the
+first frame after interaction stops. Zero-work frames are not mixed into these
+event-only latency distributions.
+
 ## Required JSON Groups
 
 - `startup`: process to QApplication, visible window, and first GL frame
@@ -109,6 +124,12 @@ python scripts/report_bundle_size.py \
 Use `Linux-x86_64`, `macOS-arm64`, or `macOS-x86_64` for the other release
 targets. The report includes group totals, largest files and dynamic libraries,
 SHA-256 duplicate sets, and baseline deltas.
+
+`scripts/bench_linux_strip.py` can A/B a Linux tarball without modifying it.
+It strips a copied runtime tree, runs startup/native/reader smoke tests, and
+reports both tree and compressed-archive deltas. NumPy wheel libraries and the
+PyInstaller launcher are intentionally excluded because post-build GNU strip
+can invalidate their ELF layout or embedded package section.
 
 ## Release Coverage
 

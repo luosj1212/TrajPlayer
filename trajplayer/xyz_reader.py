@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import BinaryIO
 
 import numpy as np
@@ -11,6 +12,65 @@ from .reader_common import StructureFrame, normalize_symbol, numbers_to_symbols,
 _KEY_VALUE_PATTERN = re.compile(
     r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\"(?P<double>[^\"]*)\"|'(?P<single>[^']*)'|(?P<bare>\S+))"
 )
+
+
+@dataclass(frozen=True, slots=True)
+class XyzFrameLayout:
+    data_offset: int
+    identity_column: int
+    identity_is_atomic_number: bool
+    position_columns: tuple[int, int, int]
+    expected_columns: int
+    cell: np.ndarray | None
+
+
+def inspect_xyz_frame_buffer(
+    source,
+    frame_offset: int,
+    atom_count: int,
+    frame_index: int,
+) -> XyzFrameLayout:
+    """Inspect one XYZ header/comment without decoding its atom rows."""
+
+    start = int(frame_offset)
+    source_size = len(source)
+    if start < 0 or start >= source_size:
+        raise ValueError(f"XYZ frame {frame_index} ended before its atom count")
+    header_end = source.find(b"\n", start, source_size)
+    if header_end < 0:
+        raise ValueError(f"XYZ frame {frame_index} ended before its atom count")
+    try:
+        parsed_atom_count = int(bytes(source[start:header_end]).strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid XYZ frame header at frame {frame_index}") from exc
+    if parsed_atom_count != int(atom_count):
+        raise ValueError(
+            f"Frame {frame_index} has {parsed_atom_count} atoms; expected {atom_count}"
+        )
+
+    comment_start = header_end + 1
+    comment_end = source.find(b"\n", comment_start, source_size)
+    if comment_end < 0:
+        raise ValueError(f"XYZ frame {frame_index} is missing its comment line")
+    comment = bytes(source[comment_start:comment_end]).decode(
+        "utf-8",
+        errors="replace",
+    )
+    metadata = _parse_comment(comment.strip())
+    properties = _parse_properties(metadata.get("Properties"))
+    species_column, number_column, position_columns, expected_columns = _column_layout(
+        properties
+    )
+    return XyzFrameLayout(
+        data_offset=comment_end + 1,
+        identity_column=(
+            int(number_column) if number_column is not None else int(species_column)
+        ),
+        identity_is_atomic_number=number_column is not None,
+        position_columns=position_columns,
+        expected_columns=expected_columns,
+        cell=_parse_lattice(metadata.get("Lattice")),
+    )
 
 
 def read_xyz_frame(handle: BinaryIO, atom_count: int, frame_index: int) -> StructureFrame:

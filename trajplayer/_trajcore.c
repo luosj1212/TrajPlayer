@@ -38,6 +38,206 @@ typedef struct {
 } CandidateBuffer;
 
 
+typedef struct {
+    float distance2;
+    int32_t left;
+    int32_t right;
+    npy_intp ordinal;
+} BondCandidate;
+
+
+typedef enum {
+    XYZ_PARSE_OK = 0,
+    XYZ_PARSE_TRUNCATED,
+    XYZ_PARSE_MISSING_COLUMNS,
+    XYZ_PARSE_INVALID_POSITION,
+    XYZ_PARSE_INVALID_IDENTITY,
+    XYZ_PARSE_IDENTITY_MISMATCH
+} XyzParseStatus;
+
+
+typedef struct {
+    XyzParseStatus status;
+    npy_intp atom;
+    int column;
+} XyzParseError;
+
+
+static const char *CHEMICAL_SYMBOLS[] = {
+    "X", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne",
+    "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",
+    "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+    "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr",
+    "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn",
+    "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd",
+    "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb",
+    "Lu", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
+    "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th",
+    "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm",
+    "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds",
+    "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og"
+};
+
+
+static int ascii_space(unsigned char value) {
+    return value == ' ' || value == '\t' || value == '\r'
+        || value == '\n' || value == '\v' || value == '\f';
+}
+
+
+static int ascii_alpha(unsigned char value) {
+    return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
+}
+
+
+static unsigned char ascii_upper(unsigned char value) {
+    return value >= 'a' && value <= 'z' ? (unsigned char)(value - ('a' - 'A')) : value;
+}
+
+
+static unsigned char ascii_lower(unsigned char value) {
+    return value >= 'A' && value <= 'Z' ? (unsigned char)(value + ('a' - 'A')) : value;
+}
+
+
+static int token_equals_ascii_casefold(
+    const unsigned char *start,
+    const unsigned char *end,
+    const char *literal
+) {
+    const unsigned char *cursor = start;
+    const unsigned char *expected = (const unsigned char *)literal;
+    while (cursor < end && *expected != '\0') {
+        if (ascii_lower(*cursor) != ascii_lower(*expected)) return 0;
+        ++cursor;
+        ++expected;
+    }
+    return cursor == end && *expected == '\0';
+}
+
+
+static int parse_float_token(
+    const unsigned char *start,
+    const unsigned char *end,
+    float *output
+) {
+    const unsigned char *cursor = start;
+    int negative = 0;
+    if (cursor < end && (*cursor == '+' || *cursor == '-')) {
+        negative = *cursor == '-';
+        ++cursor;
+    }
+    if (cursor >= end) return 0;
+
+    if (token_equals_ascii_casefold(cursor, end, "nan")) {
+        *output = negative ? -NAN : NAN;
+        return 1;
+    }
+    if (
+        token_equals_ascii_casefold(cursor, end, "inf")
+        || token_equals_ascii_casefold(cursor, end, "infinity")
+    ) {
+        *output = negative ? -INFINITY : INFINITY;
+        return 1;
+    }
+
+    double value = 0.0;
+    int digits = 0;
+    while (cursor < end && *cursor >= '0' && *cursor <= '9') {
+        value = value * 10.0 + (double)(*cursor - '0');
+        ++cursor;
+        ++digits;
+    }
+    if (cursor < end && *cursor == '.') {
+        ++cursor;
+        double scale = 0.1;
+        while (cursor < end && *cursor >= '0' && *cursor <= '9') {
+            value += (double)(*cursor - '0') * scale;
+            scale *= 0.1;
+            ++cursor;
+            ++digits;
+        }
+    }
+    if (digits == 0) return 0;
+
+    int exponent = 0;
+    int exponent_negative = 0;
+    if (cursor < end && (*cursor == 'e' || *cursor == 'E')) {
+        ++cursor;
+        if (cursor < end && (*cursor == '+' || *cursor == '-')) {
+            exponent_negative = *cursor == '-';
+            ++cursor;
+        }
+        int exponent_digits = 0;
+        while (cursor < end && *cursor >= '0' && *cursor <= '9') {
+            if (exponent < 100000) exponent = exponent * 10 + (*cursor - '0');
+            ++cursor;
+            ++exponent_digits;
+        }
+        if (exponent_digits == 0) return 0;
+    }
+    if (cursor != end) return 0;
+    if (exponent != 0) {
+        value *= pow(10.0, exponent_negative ? -(double)exponent : (double)exponent);
+    }
+    *output = (float)(negative ? -value : value);
+    return 1;
+}
+
+
+static int parse_atomic_number_token(
+    const unsigned char *start,
+    const unsigned char *end,
+    uint16_t *output
+) {
+    const unsigned char *cursor = start;
+    int negative = 0;
+    if (cursor < end && (*cursor == '+' || *cursor == '-')) {
+        negative = *cursor == '-';
+        ++cursor;
+    }
+    if (negative || cursor >= end) return 0;
+    uint32_t value = 0;
+    int digits = 0;
+    while (cursor < end && *cursor >= '0' && *cursor <= '9') {
+        uint32_t digit = (uint32_t)(*cursor - '0');
+        if (value > (UINT16_MAX - digit) / 10u) return 0;
+        value = value * 10u + digit;
+        ++cursor;
+        ++digits;
+    }
+    if (digits == 0 || cursor != end) return 0;
+    *output = (uint16_t)value;
+    return 1;
+}
+
+
+static uint16_t symbol_token_to_atomic_number(
+    const unsigned char *start,
+    const unsigned char *end
+) {
+    unsigned char letters[2] = {0, 0};
+    int letter_count = 0;
+    for (const unsigned char *cursor = start; cursor < end && letter_count < 2; ++cursor) {
+        if (ascii_alpha(*cursor)) letters[letter_count++] = *cursor;
+    }
+    if (letter_count == 0) return 0;
+
+    char candidate[3] = {(char)ascii_upper(letters[0]), '\0', '\0'};
+    if (letter_count >= 2) {
+        candidate[1] = (char)ascii_lower(letters[1]);
+        for (uint16_t number = 1; number <= 118; ++number) {
+            if (strcmp(candidate, CHEMICAL_SYMBOLS[number]) == 0) return number;
+        }
+        candidate[1] = '\0';
+    }
+    for (uint16_t number = 1; number <= 118; ++number) {
+        if (strcmp(candidate, CHEMICAL_SYMBOLS[number]) == 0) return number;
+    }
+    return 0;
+}
+
+
 static int compare_entries(const void *lhs, const void *rhs) {
     const CellEntry *a = (const CellEntry *)lhs;
     const CellEntry *b = (const CellEntry *)rhs;
@@ -45,6 +245,17 @@ static int compare_entries(const void *lhs, const void *rhs) {
     if (a->y != b->y) return a->y < b->y ? -1 : 1;
     if (a->z != b->z) return a->z < b->z ? -1 : 1;
     if (a->atom != b->atom) return a->atom < b->atom ? -1 : 1;
+    return 0;
+}
+
+
+static int compare_bond_candidates(const void *lhs, const void *rhs) {
+    const BondCandidate *a = (const BondCandidate *)lhs;
+    const BondCandidate *b = (const BondCandidate *)rhs;
+    if (a->distance2 != b->distance2) return a->distance2 < b->distance2 ? -1 : 1;
+    if (a->left != b->left) return a->left < b->left ? -1 : 1;
+    if (a->right != b->right) return a->right < b->right ? -1 : 1;
+    if (a->ordinal != b->ordinal) return a->ordinal < b->ordinal ? -1 : 1;
     return 0;
 }
 
@@ -309,6 +520,126 @@ static PyObject *trajcore_coarse_depth_order(PyObject *self, PyObject *args) {
     Py_END_ALLOW_THREADS
 
     Py_DECREF(depth);
+    return (PyObject *)order;
+}
+
+
+static float projected_depth(
+    const float *positions,
+    npy_intp index,
+    const float forward[3]
+) {
+    const float *position = positions + (size_t)index * 3;
+    return position[0] * forward[0]
+        + position[1] * forward[1]
+        + position[2] * forward[2];
+}
+
+
+static PyObject *trajcore_coarse_position_depth_order(PyObject *self, PyObject *args) {
+    PyObject *positions_object;
+    PyObject *forward_object;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "OO", &positions_object, &forward_object)) return NULL;
+
+    PyArrayObject *positions = (PyArrayObject *)PyArray_FROM_OTF(
+        positions_object,
+        NPY_FLOAT32,
+        NPY_ARRAY_IN_ARRAY
+    );
+    if (positions == NULL) return NULL;
+    PyArrayObject *forward = (PyArrayObject *)PyArray_FROM_OTF(
+        forward_object,
+        NPY_FLOAT32,
+        NPY_ARRAY_IN_ARRAY
+    );
+    if (forward == NULL) {
+        Py_DECREF(positions);
+        return NULL;
+    }
+    if (PyArray_NDIM(positions) != 2 || PyArray_DIM(positions, 1) != 3) {
+        Py_DECREF(positions);
+        Py_DECREF(forward);
+        PyErr_SetString(PyExc_ValueError, "positions must have shape (N, 3)");
+        return NULL;
+    }
+    if (PyArray_NDIM(forward) != 1 || PyArray_DIM(forward, 0) != 3) {
+        Py_DECREF(positions);
+        Py_DECREF(forward);
+        PyErr_SetString(PyExc_ValueError, "camera_forward must have shape (3,)");
+        return NULL;
+    }
+
+    npy_intp count = PyArray_DIM(positions, 0);
+    npy_intp output_dims[1] = {count};
+    PyArrayObject *order = (PyArrayObject *)PyArray_SimpleNew(1, output_dims, NPY_INT64);
+    if (order == NULL) {
+        Py_DECREF(positions);
+        Py_DECREF(forward);
+        return NULL;
+    }
+    const float *position_data = (const float *)PyArray_DATA(positions);
+    const float *forward_data = (const float *)PyArray_DATA(forward);
+    int64_t *output = (int64_t *)PyArray_DATA(order);
+    if (count <= 1) {
+        if (count == 1) output[0] = 0;
+        Py_DECREF(positions);
+        Py_DECREF(forward);
+        return (PyObject *)order;
+    }
+
+    npy_intp bin_counts[256] = {0};
+    npy_intp bin_offsets[256] = {0};
+    float minimum = 0.0f;
+    float maximum = 0.0f;
+    int valid_span = 1;
+
+    Py_BEGIN_ALLOW_THREADS
+    minimum = projected_depth(position_data, 0, forward_data);
+    maximum = minimum;
+    if (!isfinite(minimum)) valid_span = 0;
+    for (npy_intp index = 1; index < count && valid_span; ++index) {
+        float value = projected_depth(position_data, index, forward_data);
+        if (!isfinite(value)) {
+            valid_span = 0;
+            break;
+        }
+        if (value < minimum) minimum = value;
+        if (value > maximum) maximum = value;
+    }
+
+    double span = (double)maximum - (double)minimum;
+    if (!isfinite(span) || span <= (double)FLT_EPSILON) valid_span = 0;
+    if (valid_span) {
+        float scale = (float)(255.0 / span);
+        for (npy_intp index = 0; index < count; ++index) {
+            float scaled = (projected_depth(position_data, index, forward_data) - minimum) * scale;
+            int bin = (int)scaled;
+            if (bin < 0) bin = 0;
+            else if (bin > 255) bin = 255;
+            bin_counts[bin] += 1;
+        }
+        npy_intp offset = 0;
+        for (int bin = 255; bin >= 0; --bin) {
+            bin_offsets[bin] = offset;
+            offset += bin_counts[bin];
+        }
+        for (npy_intp index = count; index-- > 0;) {
+            float scaled = (projected_depth(position_data, index, forward_data) - minimum) * scale;
+            int bin = (int)scaled;
+            if (bin < 0) bin = 0;
+            else if (bin > 255) bin = 255;
+            output[bin_offsets[bin]++] = (int64_t)index;
+        }
+    } else {
+        for (npy_intp index = 0; index < count; ++index) {
+            output[index] = (int64_t)(count - 1 - index);
+        }
+    }
+    Py_END_ALLOW_THREADS
+
+    Py_DECREF(positions);
+    Py_DECREF(forward);
     return (PyObject *)order;
 }
 
@@ -738,7 +1069,415 @@ static PyObject *trajcore_candidate_pairs(PyObject *self, PyObject *args) {
 }
 
 
+static PyObject *trajcore_select_valence_bonds(PyObject *self, PyObject *args) {
+    PyObject *distance2_object;
+    PyObject *left_object;
+    PyObject *right_object;
+    PyObject *caps_object;
+    (void)self;
+    if (!PyArg_ParseTuple(
+        args,
+        "OOOO",
+        &distance2_object,
+        &left_object,
+        &right_object,
+        &caps_object
+    )) {
+        return NULL;
+    }
+
+    PyArrayObject *distance2 = (PyArrayObject *)PyArray_FROM_OTF(
+        distance2_object,
+        NPY_FLOAT32,
+        NPY_ARRAY_IN_ARRAY
+    );
+    PyArrayObject *left = (PyArrayObject *)PyArray_FROM_OTF(
+        left_object,
+        NPY_INT32,
+        NPY_ARRAY_IN_ARRAY
+    );
+    PyArrayObject *right = (PyArrayObject *)PyArray_FROM_OTF(
+        right_object,
+        NPY_INT32,
+        NPY_ARRAY_IN_ARRAY
+    );
+    PyArrayObject *caps = (PyArrayObject *)PyArray_FROM_OTF(
+        caps_object,
+        NPY_UINT8,
+        NPY_ARRAY_IN_ARRAY
+    );
+    if (distance2 == NULL || left == NULL || right == NULL || caps == NULL) {
+        Py_XDECREF(distance2);
+        Py_XDECREF(left);
+        Py_XDECREF(right);
+        Py_XDECREF(caps);
+        return NULL;
+    }
+
+    int shapes_valid =
+        PyArray_NDIM(distance2) == 1
+        && PyArray_NDIM(left) == 1
+        && PyArray_NDIM(right) == 1
+        && PyArray_NDIM(caps) == 1
+        && PyArray_DIM(distance2, 0) == PyArray_DIM(left, 0)
+        && PyArray_DIM(distance2, 0) == PyArray_DIM(right, 0);
+    if (!shapes_valid) {
+        Py_DECREF(distance2);
+        Py_DECREF(left);
+        Py_DECREF(right);
+        Py_DECREF(caps);
+        PyErr_SetString(
+            PyExc_ValueError,
+            "distance2, left, right, and caps must be one-dimensional; candidate lengths must match"
+        );
+        return NULL;
+    }
+
+    npy_intp candidate_count = PyArray_DIM(distance2, 0);
+    npy_intp atom_count = PyArray_DIM(caps, 0);
+    if (atom_count > INT32_MAX) {
+        Py_DECREF(distance2);
+        Py_DECREF(left);
+        Py_DECREF(right);
+        Py_DECREF(caps);
+        PyErr_SetString(PyExc_ValueError, "caps length must fit in int32");
+        return NULL;
+    }
+
+    float *distance_data = (float *)PyArray_DATA(distance2);
+    int32_t *left_data = (int32_t *)PyArray_DATA(left);
+    int32_t *right_data = (int32_t *)PyArray_DATA(right);
+    uint8_t *cap_data = (uint8_t *)PyArray_DATA(caps);
+    BondCandidate *candidates = NULL;
+    uint16_t *degrees = NULL;
+    int32_t *bond_data = NULL;
+    if (candidate_count > 0) {
+        candidates = (BondCandidate *)malloc(
+            (size_t)candidate_count * sizeof(BondCandidate)
+        );
+    }
+    if (atom_count > 0) {
+        degrees = (uint16_t *)calloc((size_t)atom_count, sizeof(uint16_t));
+    }
+    if ((candidate_count > 0 && candidates == NULL) || (atom_count > 0 && degrees == NULL)) {
+        free(candidates);
+        free(degrees);
+        Py_DECREF(distance2);
+        Py_DECREF(left);
+        Py_DECREF(right);
+        Py_DECREF(caps);
+        return PyErr_NoMemory();
+    }
+
+    uint64_t cap_sum = 0;
+    for (npy_intp atom = 0; atom < atom_count; ++atom) cap_sum += cap_data[atom];
+    npy_intp max_bond_count = candidate_count;
+    if ((uint64_t)max_bond_count > cap_sum / 2u) {
+        max_bond_count = (npy_intp)(cap_sum / 2u);
+    }
+    if (max_bond_count > 0) {
+        bond_data = (int32_t *)malloc((size_t)max_bond_count * 2u * sizeof(int32_t));
+        if (bond_data == NULL) {
+            free(candidates);
+            free(degrees);
+            Py_DECREF(distance2);
+            Py_DECREF(left);
+            Py_DECREF(right);
+            Py_DECREF(caps);
+            return PyErr_NoMemory();
+        }
+    }
+
+    int invalid_input = 0;
+    npy_intp bond_count = 0;
+    Py_BEGIN_ALLOW_THREADS
+    for (npy_intp candidate = 0; candidate < candidate_count; ++candidate) {
+        int32_t i = left_data[candidate];
+        int32_t j = right_data[candidate];
+        float value = distance_data[candidate];
+        if (
+            !isfinite(value)
+            || i < 0
+            || i >= atom_count
+            || j < 0
+            || j >= atom_count
+            || i == j
+        ) {
+            invalid_input = 1;
+            break;
+        }
+        candidates[candidate].distance2 = value;
+        candidates[candidate].left = i;
+        candidates[candidate].right = j;
+        candidates[candidate].ordinal = candidate;
+    }
+    if (!invalid_input && candidate_count > 1) {
+        qsort(
+            candidates,
+            (size_t)candidate_count,
+            sizeof(BondCandidate),
+            compare_bond_candidates
+        );
+    }
+    if (!invalid_input) {
+        for (npy_intp candidate = 0; candidate < candidate_count; ++candidate) {
+            int32_t i = candidates[candidate].left;
+            int32_t j = candidates[candidate].right;
+            if (degrees[i] >= cap_data[i] || degrees[j] >= cap_data[j]) continue;
+            degrees[i] += 1;
+            degrees[j] += 1;
+            bond_data[bond_count * 2] = i;
+            bond_data[bond_count * 2 + 1] = j;
+            ++bond_count;
+            if (bond_count == max_bond_count) break;
+        }
+    }
+    Py_END_ALLOW_THREADS
+
+    free(candidates);
+    free(degrees);
+    Py_DECREF(distance2);
+    Py_DECREF(left);
+    Py_DECREF(right);
+    Py_DECREF(caps);
+    if (invalid_input) {
+        free(bond_data);
+        PyErr_SetString(
+            PyExc_ValueError,
+            "candidate distances must be finite and atom indices must be distinct and in range"
+        );
+        return NULL;
+    }
+
+    npy_intp output_dims[2] = {bond_count, 2};
+    PyArrayObject *output = (PyArrayObject *)PyArray_SimpleNew(2, output_dims, NPY_INT32);
+    if (output == NULL) {
+        free(bond_data);
+        return NULL;
+    }
+    if (bond_count > 0) {
+        memcpy(PyArray_DATA(output), bond_data, (size_t)bond_count * 2u * sizeof(int32_t));
+    }
+    free(bond_data);
+    return (PyObject *)output;
+}
+
+
+static PyObject *trajcore_xyz_read_frame_into(PyObject *self, PyObject *args) {
+    PyObject *source_object;
+    PyObject *positions_object;
+    PyObject *layout_object;
+    PyObject *expected_object;
+    Py_ssize_t data_start;
+    Py_ssize_t data_end;
+    int identity_is_atomic_number;
+    (void)self;
+    if (!PyArg_ParseTuple(
+        args,
+        "OnnOOOp",
+        &source_object,
+        &data_start,
+        &data_end,
+        &positions_object,
+        &layout_object,
+        &expected_object,
+        &identity_is_atomic_number
+    )) {
+        return NULL;
+    }
+
+    if (!PyArray_Check(positions_object)) {
+        PyErr_SetString(PyExc_TypeError, "positions must be a NumPy array");
+        return NULL;
+    }
+    PyArrayObject *positions = (PyArrayObject *)positions_object;
+    if (
+        PyArray_TYPE(positions) != NPY_FLOAT32
+        || PyArray_NDIM(positions) != 2
+        || PyArray_DIM(positions, 1) != 3
+        || !PyArray_IS_C_CONTIGUOUS(positions)
+        || !PyArray_ISWRITEABLE(positions)
+    ) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "positions must be a writable C-contiguous float32 array with shape (N, 3)"
+        );
+        return NULL;
+    }
+
+    PyArrayObject *layout = (PyArrayObject *)PyArray_FROM_OTF(
+        layout_object,
+        NPY_INT32,
+        NPY_ARRAY_IN_ARRAY
+    );
+    if (layout == NULL) return NULL;
+    PyArrayObject *expected = (PyArrayObject *)PyArray_FROM_OTF(
+        expected_object,
+        NPY_UINT16,
+        NPY_ARRAY_IN_ARRAY
+    );
+    if (expected == NULL) {
+        Py_DECREF(layout);
+        return NULL;
+    }
+    npy_intp atom_count = PyArray_DIM(positions, 0);
+    if (PyArray_NDIM(layout) != 1 || PyArray_DIM(layout, 0) != 5) {
+        Py_DECREF(layout);
+        Py_DECREF(expected);
+        PyErr_SetString(PyExc_ValueError, "layout must contain five int32 values");
+        return NULL;
+    }
+    if (PyArray_NDIM(expected) != 1 || PyArray_DIM(expected, 0) != atom_count) {
+        Py_DECREF(layout);
+        Py_DECREF(expected);
+        PyErr_SetString(PyExc_ValueError, "expected_atom_numbers must have shape (N,)");
+        return NULL;
+    }
+
+    int32_t *layout_data = (int32_t *)PyArray_DATA(layout);
+    int identity_column = layout_data[0];
+    int position_columns[3] = {layout_data[1], layout_data[2], layout_data[3]};
+    int expected_columns = layout_data[4];
+    if (
+        expected_columns <= 0
+        || identity_column < 0
+        || identity_column >= expected_columns
+        || position_columns[0] < 0
+        || position_columns[0] >= expected_columns
+        || position_columns[1] < 0
+        || position_columns[1] >= expected_columns
+        || position_columns[2] < 0
+        || position_columns[2] >= expected_columns
+    ) {
+        Py_DECREF(layout);
+        Py_DECREF(expected);
+        PyErr_SetString(PyExc_ValueError, "XYZ column layout is invalid");
+        return NULL;
+    }
+
+    Py_buffer source = {0};
+    if (PyObject_GetBuffer(source_object, &source, PyBUF_CONTIG_RO) < 0) {
+        Py_DECREF(layout);
+        Py_DECREF(expected);
+        return NULL;
+    }
+    if (
+        data_start < 0
+        || data_end < data_start
+        || data_end > source.len
+    ) {
+        PyBuffer_Release(&source);
+        Py_DECREF(layout);
+        Py_DECREF(expected);
+        PyErr_SetString(PyExc_ValueError, "XYZ byte range lies outside the source buffer");
+        return NULL;
+    }
+
+    const unsigned char *cursor = (const unsigned char *)source.buf + data_start;
+    const unsigned char *end = (const unsigned char *)source.buf + data_end;
+    float *position_data = (float *)PyArray_DATA(positions);
+    uint16_t *expected_numbers = (uint16_t *)PyArray_DATA(expected);
+    XyzParseError error = {XYZ_PARSE_OK, -1, -1};
+
+    Py_BEGIN_ALLOW_THREADS
+    for (npy_intp atom = 0; atom < atom_count; ++atom) {
+        if (cursor >= end) {
+            error.status = XYZ_PARSE_TRUNCATED;
+            error.atom = atom;
+            break;
+        }
+        const unsigned char *line_end = cursor;
+        while (line_end < end && *line_end != '\n') ++line_end;
+        const unsigned char *token_cursor = cursor;
+
+        for (int column = 0; column < expected_columns; ++column) {
+            while (token_cursor < line_end && ascii_space(*token_cursor)) ++token_cursor;
+            if (token_cursor >= line_end) {
+                error.status = XYZ_PARSE_MISSING_COLUMNS;
+                error.atom = atom;
+                error.column = column;
+                break;
+            }
+            const unsigned char *token_start = token_cursor;
+            while (token_cursor < line_end && !ascii_space(*token_cursor)) ++token_cursor;
+            const unsigned char *token_end = token_cursor;
+
+            if (column == identity_column) {
+                uint16_t actual_number = 0;
+                int valid_identity = identity_is_atomic_number
+                    ? parse_atomic_number_token(token_start, token_end, &actual_number)
+                    : 1;
+                if (!identity_is_atomic_number) {
+                    actual_number = symbol_token_to_atomic_number(token_start, token_end);
+                }
+                if (!valid_identity) {
+                    error.status = XYZ_PARSE_INVALID_IDENTITY;
+                    error.atom = atom;
+                    error.column = column;
+                    break;
+                }
+                if (actual_number != expected_numbers[atom]) {
+                    error.status = XYZ_PARSE_IDENTITY_MISMATCH;
+                    error.atom = atom;
+                    error.column = column;
+                    break;
+                }
+            }
+
+            for (int axis = 0; axis < 3; ++axis) {
+                if (column != position_columns[axis]) continue;
+                float value;
+                if (!parse_float_token(token_start, token_end, &value)) {
+                    error.status = XYZ_PARSE_INVALID_POSITION;
+                    error.atom = atom;
+                    error.column = column;
+                    break;
+                }
+                position_data[(size_t)atom * 3 + axis] = value;
+            }
+            if (error.status != XYZ_PARSE_OK) break;
+        }
+        if (error.status != XYZ_PARSE_OK) break;
+        cursor = line_end < end ? line_end + 1 : line_end;
+    }
+    Py_END_ALLOW_THREADS
+
+    PyBuffer_Release(&source);
+    Py_DECREF(layout);
+    Py_DECREF(expected);
+    if (error.status != XYZ_PARSE_OK) {
+        const char *reason = "could not be parsed";
+        if (error.status == XYZ_PARSE_TRUNCATED) reason = "frame ended early";
+        else if (error.status == XYZ_PARSE_MISSING_COLUMNS) reason = "atom row has too few columns";
+        else if (error.status == XYZ_PARSE_INVALID_POSITION) reason = "position is not numeric";
+        else if (error.status == XYZ_PARSE_INVALID_IDENTITY) reason = "atomic identity is invalid";
+        else if (error.status == XYZ_PARSE_IDENTITY_MISMATCH) reason = "atomic identity differs from frame 0";
+        PyErr_Format(
+            PyExc_ValueError,
+            "XYZ native parser failed at atom %zd, column %d: %s",
+            error.atom,
+            error.column,
+            reason
+        );
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+
 static PyMethodDef trajcore_methods[] = {
+    {
+        "xyz_read_frame_into",
+        trajcore_xyz_read_frame_into,
+        METH_VARARGS,
+        "Parse XYZ atom rows directly into a caller-owned float32 array."
+    },
+    {
+        "coarse_position_depth_order",
+        trajcore_coarse_position_depth_order,
+        METH_VARARGS,
+        "Project canonical positions and return a far-to-near 256-bin order."
+    },
     {
         "coarse_depth_order",
         trajcore_coarse_depth_order,
@@ -756,6 +1495,12 @@ static PyMethodDef trajcore_methods[] = {
         trajcore_candidate_pairs,
         METH_VARARGS,
         "Return neighbor pairs within a cutoff using a native cell list."
+    },
+    {
+        "select_valence_bonds",
+        trajcore_select_valence_bonds,
+        METH_VARARGS,
+        "Sort bond candidates and apply per-atom valence caps."
     },
     {NULL, NULL, 0, NULL}
 };

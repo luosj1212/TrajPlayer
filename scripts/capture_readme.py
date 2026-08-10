@@ -20,12 +20,19 @@ def main() -> None:
     parser.add_argument("trajectory", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--wait-ms", type=int, default=3500)
+    parser.add_argument("--width", type=int, default=1440)
+    parser.add_argument("--height", type=int, default=920)
+    parser.add_argument("--language", choices=("en", "zh"))
     args = parser.parse_args()
 
     QSurfaceFormat.setDefaultFormat(default_surface_format())
     application = QApplication([])
     window = TrajPlayerWindow()
-    window.resize(1440, 920)
+    previous_language = window.ui_language
+    if args.language is not None and window.ui_language != args.language:
+        index = window.language_combo.findData(args.language)
+        window.language_combo.setCurrentIndex(index)
+    window.resize(max(720, args.width), max(520, args.height))
     window.show()
 
     trajectory = args.trajectory.resolve()
@@ -36,6 +43,9 @@ def main() -> None:
         image = window.grab()
         if not image.save(str(output), "PNG"):
             raise RuntimeError(f"Could not save screenshot to {output}")
+        if args.language is not None and args.language != previous_language:
+            window._settings.setValue("ui/language", previous_language)
+            window._settings.sync()
         window.close()
         application.quit()
 

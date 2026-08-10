@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import mmap
 import os
 import shutil
 import threading
@@ -18,8 +19,9 @@ from .binary_store import (
 )
 from .ase_traj_reader import AseUlmTrajectoryReader
 from .structure_reader import read_structure
+from .trajcore import NATIVE_XYZ_READ_AVAILABLE, xyz_read_frame_into
 from .trajectory_source import TrajectorySource
-from .xyz_reader import read_xyz_frame
+from .xyz_reader import inspect_xyz_frame_buffer, read_xyz_frame
 from .xyz_index import FRAME_OFFSETS_FILE, IndexIoCoordinator, ProgressiveXyzIndex
 
 
@@ -70,6 +72,10 @@ class RandomAccessTrajectoryStore:
         self.metadata: dict[str, object] = {
             "random_access": True,
             "direct_reader": True,
+            "direct_read_into": callable(getattr(reader, "read_frame_into", None)),
+            "native_xyz_read_into": bool(
+                getattr(reader, "native_xyz_read_available", False)
+            ),
             "persistent_decoded_cache": False,
             "source_files": [
                 SourceIdentity.from_path(
@@ -132,6 +138,15 @@ class RandomAccessTrajectoryStore:
         positions: np.ndarray,
         cell: np.ndarray | None,
     ) -> None:
+        direct_read = getattr(self.reader, "read_frame_into", None)
+        if callable(direct_read) and _is_direct_frame_destination(
+            positions,
+            cell,
+            atom_count=self.atom_count,
+        ):
+            with self._read_lock:
+                direct_read(int(frame_index), positions, cell)
+            return
         source_positions, source_cell = self.read_frame_arrays(frame_index)
         np.copyto(positions, source_positions)
         if cell is not None:
@@ -282,6 +297,15 @@ def write_reader_frame(
     frame_index: int,
 ) -> None:
     index = int(frame_index)
+    direct_read = getattr(reader, "read_frame_into", None)
+    if callable(direct_read):
+        direct_read(
+            index,
+            store.positions[index],
+            None if store.cells is None else store.cells[index],
+        )
+        store.publish_frame(index)
+        return
     positions, cell = reader.read_frame(index)
     frame = np.asarray(positions, dtype=np.float32)
     expected_shape = (store.atom_count, 3)
@@ -372,6 +396,12 @@ class _IndexedXyzReader:
     ) -> None:
         self._path = path.resolve()
         self._file = self._path.open("rb")
+        self._mapped_file: mmap.mmap | None = None
+        self._prefetched_first_frame = None
+        self._native_direct_enabled = bool(NATIVE_XYZ_READ_AVAILABLE)
+        self.native_read_count = 0
+        self.python_read_count = 0
+        self.prefetched_read_count = 0
         with self._path.open("rb") as source_handle:
             header = source_handle.readline()
         try:
@@ -382,6 +412,7 @@ class _IndexedXyzReader:
         if atom_count <= 0:
             self._file.close()
             raise ValueError("XYZ atom count must be positive")
+        self._mapped_file = mmap.mmap(self._file.fileno(), length=0, access=mmap.ACCESS_READ)
 
         def publish_progress(frame_count: int, complete: bool) -> None:
             self.summary.frame_count = int(frame_count)
@@ -390,14 +421,14 @@ class _IndexedXyzReader:
                 index_progress_callback(int(frame_count), bool(complete))
 
         self._io_coordinator = IndexIoCoordinator()
-        self._index = ProgressiveXyzIndex(
-            self._path,
-            cache_root,
-            atom_count=atom_count,
-            progress_callback=publish_progress,
-            io_coordinator=self._io_coordinator,
-        )
         try:
+            self._index = ProgressiveXyzIndex(
+                self._path,
+                cache_root,
+                atom_count=atom_count,
+                progress_callback=publish_progress,
+                io_coordinator=self._io_coordinator,
+            )
             with self._io_coordinator.foreground():
                 first = self._read_frame(0, atom_count=atom_count)
             self.summary = RandomAccessSummary(
@@ -407,6 +438,7 @@ class _IndexedXyzReader:
                 symbols=list(first.symbols),
                 has_cell=first.cell is not None,
             )
+            self._prefetched_first_frame = first
             self.summary.frame_count_is_final = self._index.complete
             if not self._index.complete and status_callback is not None:
                 status_callback(
@@ -414,17 +446,94 @@ class _IndexedXyzReader:
                 )
             self._index.start()
         except Exception:
-            self._index.close()
+            index = getattr(self, "_index", None)
+            if index is not None:
+                index.close()
+            if self._mapped_file is not None:
+                self._mapped_file.close()
+                self._mapped_file = None
             self._file.close()
             raise
+
+    @property
+    def native_xyz_read_available(self) -> bool:
+        return bool(NATIVE_XYZ_READ_AVAILABLE)
 
     def read_frame(self, frame_index: int) -> tuple[np.ndarray, np.ndarray | None]:
         index = int(frame_index)
         with self._io_coordinator.foreground():
-            frame = self._read_frame(index)
+            frame = self._take_prefetched_frame(index)
+            if frame is None:
+                frame = self._read_frame(index)
+                self.python_read_count += 1
         if not np.array_equal(frame.atom_numbers, self.summary.atom_numbers):
             raise ValueError(f"Frame {index} atom ordering differs from the first frame")
         return frame.positions, frame.cell
+
+    def read_frame_into(
+        self,
+        frame_index: int,
+        positions: np.ndarray,
+        cell: np.ndarray | None,
+    ) -> None:
+        index = int(frame_index)
+        expected_shape = (self.summary.atom_count, 3)
+        if positions.shape != expected_shape:
+            raise ValueError(
+                f"Frame destination has position shape {positions.shape}; expected {expected_shape}"
+            )
+        with self._io_coordinator.foreground():
+            prefetched = self._take_prefetched_frame(index)
+            if prefetched is not None:
+                self._copy_frame_into(prefetched, positions, cell, frame_index=index)
+                return
+            if index < 0 or index >= self._index.known_frame_count:
+                raise IndexError(index)
+            if self._native_direct_enabled and self._mapped_file is not None:
+                start = self._index.offset(index)
+                frame_end = (
+                    self._index.offset(index + 1)
+                    if index + 1 < self._index.known_frame_count
+                    else len(self._mapped_file)
+                )
+                try:
+                    layout = inspect_xyz_frame_buffer(
+                        self._mapped_file,
+                        start,
+                        self.summary.atom_count,
+                        index,
+                    )
+                    used_native = xyz_read_frame_into(
+                        self._mapped_file,
+                        data_offset=layout.data_offset,
+                        data_end=frame_end,
+                        positions=positions,
+                        identity_column=layout.identity_column,
+                        identity_is_atomic_number=layout.identity_is_atomic_number,
+                        position_columns=layout.position_columns,
+                        expected_columns=layout.expected_columns,
+                        expected_atom_numbers=self.summary.atom_numbers,
+                    )
+                    if used_native:
+                        self._copy_cell_into(layout.cell, cell)
+                        self.native_read_count += 1
+                        return
+                    self._native_direct_enabled = False
+                except ValueError as native_error:
+                    try:
+                        fallback = self._read_frame(index)
+                        self._validate_atom_order(fallback, index)
+                    except Exception as fallback_error:
+                        raise fallback_error from native_error
+                    self._native_direct_enabled = False
+                    self.python_read_count += 1
+                    self._copy_frame_into(fallback, positions, cell, frame_index=index)
+                    return
+
+            frame = self._read_frame(index)
+            self._validate_atom_order(frame, index)
+            self.python_read_count += 1
+            self._copy_frame_into(frame, positions, cell, frame_index=index)
 
     def wait_for_index_update(
         self,
@@ -442,6 +551,10 @@ class _IndexedXyzReader:
 
     def close(self) -> None:
         self._index.close()
+        self._prefetched_first_frame = None
+        if self._mapped_file is not None:
+            self._mapped_file.close()
+            self._mapped_file = None
         self._file.close()
 
     def _read_frame(self, frame_index: int, *, atom_count: int | None = None):
@@ -451,6 +564,39 @@ class _IndexedXyzReader:
         self._file.seek(start)
         expected_atoms = self._index.atom_count if atom_count is None else int(atom_count)
         return read_xyz_frame(self._file, expected_atoms, frame_index)
+
+    def _take_prefetched_frame(self, frame_index: int):
+        if int(frame_index) != 0 or self._prefetched_first_frame is None:
+            return None
+        frame = self._prefetched_first_frame
+        self._prefetched_first_frame = None
+        self.prefetched_read_count += 1
+        return frame
+
+    def _validate_atom_order(self, frame, frame_index: int) -> None:
+        if not np.array_equal(frame.atom_numbers, self.summary.atom_numbers):
+            raise ValueError(f"Frame {frame_index} atom ordering differs from the first frame")
+
+    def _copy_frame_into(
+        self,
+        frame,
+        positions: np.ndarray,
+        cell: np.ndarray | None,
+        *,
+        frame_index: int,
+    ) -> None:
+        self._validate_atom_order(frame, frame_index)
+        np.copyto(positions, frame.positions)
+        self._copy_cell_into(frame.cell, cell)
+
+    @staticmethod
+    def _copy_cell_into(source_cell: np.ndarray | None, cell: np.ndarray | None) -> None:
+        if cell is None:
+            return
+        if source_cell is None:
+            cell.fill(0.0)
+        else:
+            np.copyto(cell, source_cell)
 
 
 class _StaticStructureReader:
@@ -541,3 +687,29 @@ def _reader_state_dir_for_source(source_path: Path) -> Path:
     )
     digest = hashlib.sha256(os.fsencode(str(path))).hexdigest()[:20]
     return cache_base / "TrajPlayer" / "readers" / digest
+
+
+def _is_direct_frame_destination(
+    positions: np.ndarray,
+    cell: np.ndarray | None,
+    *,
+    atom_count: int,
+) -> bool:
+    if not isinstance(positions, np.ndarray):
+        return False
+    if (
+        positions.dtype != np.float32
+        or positions.shape != (int(atom_count), 3)
+        or not positions.flags.c_contiguous
+        or not positions.flags.writeable
+    ):
+        return False
+    if cell is None:
+        return True
+    return bool(
+        isinstance(cell, np.ndarray)
+        and cell.dtype == np.float32
+        and cell.shape == (3, 3)
+        and cell.flags.c_contiguous
+        and cell.flags.writeable
+    )

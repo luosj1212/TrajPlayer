@@ -54,6 +54,7 @@ class AseUlmTrajectoryReader:
                 )
             self._default_cell = self._cell_from_item(first)
             self.has_cell = self._default_cell is not None
+            self._prefetched_first_frame = (first_positions, self._default_cell)
         except Exception:
             self.close()
             raise
@@ -66,6 +67,10 @@ class AseUlmTrajectoryReader:
         index = int(frame_index)
         if index < 0 or index >= self.frame_count:
             raise IndexError(index)
+        prefetched = getattr(self, "_prefetched_first_frame", None)
+        if index == 0 and prefetched is not None:
+            self._prefetched_first_frame = None
+            return prefetched
         item = self._read_item(index)
         positions = self._positions_from_item(item, index)
         if positions.shape != (self.atom_count, 3):
@@ -83,6 +88,7 @@ class AseUlmTrajectoryReader:
         return positions, cell
 
     def close(self) -> None:
+        self._prefetched_first_frame = None
         offsets = getattr(self, "_offsets", None)
         if offsets is not None:
             mmap = getattr(offsets, "_mmap", None)

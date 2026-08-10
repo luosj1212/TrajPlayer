@@ -20,7 +20,11 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from .element_style import atom_render_arrays
 from .present_scheduler import RenderTicket
 from .render_stats import RenderStats
-from .trajcore import DEPTH_BIN_COUNT, coarse_depth_order as _coarse_depth_order
+from .trajcore import (
+    DEPTH_BIN_COUNT,
+    coarse_depth_order as _coarse_depth_order,
+    coarse_position_depth_order,
+)
 
 
 GL_FLOAT = 0x1406
@@ -35,10 +39,12 @@ GL_ONE_MINUS_SRC_ALPHA = 0x0303
 GL_TEXTURE0 = 0x84C0
 GL_TEXTURE_BUFFER = 0x8C2A
 GL_R32F = 0x822E
+GL_RGB32F = 0x8815
 GL_VENDOR = 0x1F00
 GL_RENDERER = 0x1F01
 GL_VERSION = 0x1F02
 POSITION_BUFFER_COUNT = 3
+ATOM_PERMUTATION_BUFFER_COUNT = 3
 DEPTH_SORT_IDLE_MS = 80
 COARSE_DEPTH_SORT_ATOMS = 250_000
 COARSE_DEPTH_BINS = DEPTH_BIN_COUNT
@@ -286,13 +292,13 @@ def bond_segment_endpoints_for_frame(
 VERTEX_SHADER = f"""
 #version 330 core
 layout(location = 1) in float a_atom_index;
-layout(location = 2) in float a_radius;
-layout(location = 3) in vec3 a_color;
-layout(location = 8) in float a_unwrap_anchor_index;
 
 uniform mat4 u_view;
 uniform mat4 u_proj;
 uniform samplerBuffer u_positions;
+uniform samplerBuffer u_atom_radii;
+uniform samplerBuffer u_atom_colors;
+uniform samplerBuffer u_atom_anchors;
 uniform float u_atom_size_scale;
 uniform int u_has_periodic_cell;
 uniform vec3 u_cell_a;
@@ -346,12 +352,17 @@ vec2 corner_from_vertex_id() {{
 
 void main() {{
     vec2 corner = corner_from_vertex_id();
+    int atom_index = int(a_atom_index + 0.5);
+    int anchor_index = int(texelFetch(u_atom_anchors, atom_index).r);
     vec3 atom_position = display_position(
-        int(a_atom_index + 0.5),
-        int(a_unwrap_anchor_index)
+        atom_index,
+        anchor_index
     );
     vec4 center = u_view * vec4(atom_position, 1.0);
-    float radius = max(a_radius * u_atom_size_scale, 0.001);
+    float radius = max(
+        texelFetch(u_atom_radii, atom_index).r * u_atom_size_scale,
+        0.001
+    );
     vec4 clip_center = u_proj * center;
     vec4 clip_edge = u_proj * vec4(center.xyz + vec3(radius, 0.0, 0.0), 1.0);
     float aspect = u_proj[1][1] / max(u_proj[0][0], 0.0001);
@@ -360,7 +371,7 @@ void main() {{
     gl_Position = clip_center;
     gl_Position.xy += ndc_offset * gl_Position.w;
     v_corner = corner;
-    v_color = a_color;
+    v_color = texelFetch(u_atom_colors, atom_index).rgb;
     v_view_center = center.xyz;
     v_radius = radius;
 }}
@@ -609,7 +620,13 @@ class MoleculeGLWidget(QOpenGLWidget):
             for _ in range(POSITION_BUFFER_COUNT)
         ]
         self._position_vbo = self._position_vbos[0]
-        self._atom_index_vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
+        self._atom_index_vbos = [
+            QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
+            for _ in range(ATOM_PERMUTATION_BUFFER_COUNT)
+        ]
+        self._atom_index_vbo = self._atom_index_vbos[0]
+        self._atom_index_buffer_index = -1
+        self._atom_index_buffer_sizes = [0] * ATOM_PERMUTATION_BUFFER_COUNT
         self._radius_vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
         self._color_vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
         self._atom_unwrap_anchor_vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
@@ -618,11 +635,17 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._box_vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
         self._position_textures: list[QOpenGLTexture] = []
         self._position_texture: QOpenGLTexture | None = None
+        self._radius_texture: QOpenGLTexture | None = None
+        self._color_texture: QOpenGLTexture | None = None
+        self._atom_unwrap_anchor_texture: QOpenGLTexture | None = None
         self._position_buffer_index = -1
         self._gl = None
         self._loc_view = -1
         self._loc_proj = -1
         self._loc_positions = -1
+        self._loc_atom_radii = -1
+        self._loc_atom_colors = -1
+        self._loc_atom_anchors = -1
         self._loc_atom_size_scale = -1
         self._loc_has_periodic_cell = -1
         self._loc_cell_vectors = (-1, -1, -1)
@@ -650,11 +673,10 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._render_atom_indices = np.empty((0,), dtype=np.int32)
         self._visible_atom_indices_gpu = np.empty((0,), dtype=np.float32)
         self._atom_unwrap_anchor_indices = np.empty((0,), dtype=np.int32)
-        self._visible_unwrap_anchor_indices_gpu = np.empty((0,), dtype=np.float32)
-        self._visible_radii = np.empty((0,), dtype=np.float32)
-        self._visible_colors = np.empty((0, 3), dtype=np.float32)
         self._atom_visible_mask = np.empty((0,), dtype=np.bool_)
         self._visible_atom_count = 0
+        self._all_atoms_visible = False
+        self._has_unwrap_anchors = False
         self._depth_order_dirty = True
         self._positions_uploaded = False
         self._frame_upload_pending = True
@@ -687,7 +709,11 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._render_stats: RenderStats | None = None
         self._last_upload_ms = 0.0
         self._last_depth_sort_ms = 0.0
+        self._last_depth_order_ms = 0.0
+        self._last_array_rebuild_ms = 0.0
+        self._last_static_upload_ms = 0.0
         self._last_renderer_copy_bytes = 0
+        self._post_interaction_measure_pending = False
         self._frame_release: Callable[[], None] | None = None
         self._pending_render_ticket: RenderTicket | None = None
         self._cleaning_up = False
@@ -1007,6 +1033,9 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._loc_view = self._program.uniformLocation("u_view")
         self._loc_proj = self._program.uniformLocation("u_proj")
         self._loc_positions = self._program.uniformLocation("u_positions")
+        self._loc_atom_radii = self._program.uniformLocation("u_atom_radii")
+        self._loc_atom_colors = self._program.uniformLocation("u_atom_colors")
+        self._loc_atom_anchors = self._program.uniformLocation("u_atom_anchors")
         self._loc_atom_size_scale = self._program.uniformLocation("u_atom_size_scale")
         self._loc_has_periodic_cell = self._program.uniformLocation(
             "u_has_periodic_cell"
@@ -1020,6 +1049,10 @@ class MoleculeGLWidget(QOpenGLWidget):
             for name in ("u_inv_cell_0", "u_inv_cell_1", "u_inv_cell_2")
         )
         if min(
+            self._loc_positions,
+            self._loc_atom_radii,
+            self._loc_atom_colors,
+            self._loc_atom_anchors,
             self._loc_atom_size_scale,
             self._loc_has_periodic_cell,
             *self._loc_cell_vectors,
@@ -1079,7 +1112,8 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._quad_vbo.create()
         for buffer in self._position_vbos:
             buffer.create()
-        self._atom_index_vbo.create()
+        for buffer in self._atom_index_vbos:
+            buffer.create()
         self._radius_vbo.create()
         self._color_vbo.create()
         self._atom_unwrap_anchor_vbo.create()
@@ -1092,6 +1126,11 @@ class MoleculeGLWidget(QOpenGLWidget):
             if not texture.create():
                 raise RuntimeError("Failed to create a GPU position buffer texture")
             self._position_textures.append(texture)
+        self._radius_texture = self._create_buffer_texture("atom radius")
+        self._color_texture = self._create_buffer_texture("atom color")
+        self._atom_unwrap_anchor_texture = self._create_buffer_texture(
+            "atom unwrap anchor"
+        )
 
         self._upload_static_buffers()
         self._allocate_position_buffer()
@@ -1118,9 +1157,18 @@ class MoleculeGLWidget(QOpenGLWidget):
                         texture.destroy()
                 self._position_textures = []
                 self._position_texture = None
+                for texture in (
+                    self._radius_texture,
+                    self._color_texture,
+                    self._atom_unwrap_anchor_texture,
+                ):
+                    if texture is not None and texture.isCreated():
+                        texture.destroy()
+                self._radius_texture = None
+                self._color_texture = None
+                self._atom_unwrap_anchor_texture = None
                 for buffer in (
                     self._quad_vbo,
-                    self._atom_index_vbo,
                     self._radius_vbo,
                     self._color_vbo,
                     self._atom_unwrap_anchor_vbo,
@@ -1128,6 +1176,9 @@ class MoleculeGLWidget(QOpenGLWidget):
                     self._bond_color_vbo,
                     self._box_vbo,
                 ):
+                    if buffer.isCreated():
+                        buffer.destroy()
+                for buffer in self._atom_index_vbos:
                     if buffer.isCreated():
                         buffer.destroy()
                 for buffer in self._position_vbos:
@@ -1140,6 +1191,8 @@ class MoleculeGLWidget(QOpenGLWidget):
                 self.doneCurrent()
         finally:
             self._position_buffer_index = -1
+            self._atom_index_buffer_index = -1
+            self._atom_index_buffer_sizes = [0] * ATOM_PERMUTATION_BUFFER_COUNT
             self._positions_uploaded = False
             self._frame_upload_pending = True
             self._pending_render_ticket = None
@@ -1153,18 +1206,24 @@ class MoleculeGLWidget(QOpenGLWidget):
         draw_calls = 0
         self._last_upload_ms = 0.0
         self._last_depth_sort_ms = 0.0
+        self._last_depth_order_ms = 0.0
+        self._last_array_rebuild_ms = 0.0
+        self._last_static_upload_ms = 0.0
         self._last_renderer_copy_bytes = 0
+        post_interaction_started_s = None
         if self._frame_upload_pending:
             self._upload_frame_buffers()
         if self._box_buffer_dirty:
             self._upload_box_buffer()
         if self._depth_order_dirty:
-            depth_sort_started_s = time.perf_counter()
+            if self._post_interaction_measure_pending:
+                post_interaction_started_s = time.perf_counter()
             self._rebuild_render_atom_arrays()
-            self._last_depth_sort_ms = (
-                time.perf_counter() - depth_sort_started_s
+            static_upload_started_s = time.perf_counter()
+            self._upload_atom_permutation_buffer()
+            self._last_static_upload_ms = (
+                time.perf_counter() - static_upload_started_s
             ) * 1000.0
-            self._upload_static_buffers()
         position_texture = (
             self._position_texture if self._positions_uploaded else None
         )
@@ -1200,6 +1259,9 @@ class MoleculeGLWidget(QOpenGLWidget):
             self._program.setUniformValue(self._loc_view, view)
             self._program.setUniformValue(self._loc_proj, proj)
             self._program.setUniformValue(self._loc_positions, 0)
+            self._program.setUniformValue(self._loc_atom_radii, 1)
+            self._program.setUniformValue(self._loc_atom_colors, 2)
+            self._program.setUniformValue(self._loc_atom_anchors, 3)
             self._gl.glUniform1f(self._loc_atom_size_scale, self.effective_atom_size_scale)
             self._set_periodic_uniforms(
                 self._program,
@@ -1209,11 +1271,23 @@ class MoleculeGLWidget(QOpenGLWidget):
             )
             self._gl.glActiveTexture(GL_TEXTURE0)
             self._gl.glBindTexture(GL_TEXTURE_BUFFER, position_texture.textureId())
+            for unit, texture in (
+                (1, self._radius_texture),
+                (2, self._color_texture),
+                (3, self._atom_unwrap_anchor_texture),
+            ):
+                self._gl.glActiveTexture(GL_TEXTURE0 + unit)
+                self._gl.glBindTexture(
+                    GL_TEXTURE_BUFFER,
+                    0 if texture is None else texture.textureId(),
+                )
             self._vao.bind()
             self._gl.glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, self._visible_atom_count)
             draw_calls += 1
             self._vao.release()
-            self._gl.glBindTexture(GL_TEXTURE_BUFFER, 0)
+            for unit in (3, 2, 1, 0):
+                self._gl.glActiveTexture(GL_TEXTURE0 + unit)
+                self._gl.glBindTexture(GL_TEXTURE_BUFFER, 0)
             self._program.release()
 
         if (
@@ -1253,14 +1327,25 @@ class MoleculeGLWidget(QOpenGLWidget):
         if self._benchmark_finish_gpu:
             self._gl.glFinish()
         if self._render_stats is not None:
+            post_interaction_frame_ms = (
+                None
+                if post_interaction_started_s is None
+                else (time.perf_counter() - post_interaction_started_s) * 1000.0
+            )
             self._render_stats.record_frame(
                 paint_ms=(time.perf_counter() - paint_start) * 1000.0,
                 upload_ms=self._last_upload_ms,
                 draw_calls=draw_calls,
                 timestamp_s=paint_start,
                 depth_sort_ms=self._last_depth_sort_ms,
+                depth_order_ms=self._last_depth_order_ms,
+                array_rebuild_ms=self._last_array_rebuild_ms,
+                static_upload_ms=self._last_static_upload_ms,
+                post_interaction_frame_ms=post_interaction_frame_ms,
                 renderer_copy_bytes=self._last_renderer_copy_bytes,
             )
+        if post_interaction_started_s is not None:
+            self._post_interaction_measure_pending = False
         if painted_ticket is not None and painted_ticket == self._pending_render_ticket:
             self._pending_render_ticket = None
             self.renderTicketPainted.emit(painted_ticket)
@@ -1327,6 +1412,14 @@ class MoleculeGLWidget(QOpenGLWidget):
 
     def _refresh_depth_order_after_interaction(self) -> None:
         self._depth_order_dirty = True
+        self._post_interaction_measure_pending = True
+        self.update()
+
+    def benchmark_rotate_camera(self, yaw_delta: float = 1.0) -> None:
+        """Exercise the same deferred depth-order path as an interactive drag."""
+
+        self._yaw += float(yaw_delta)
+        self._depth_sort_timer.start()
         self.update()
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
@@ -1336,49 +1429,95 @@ class MoleculeGLWidget(QOpenGLWidget):
         self.update()
 
     def _upload_static_buffers(self) -> None:
+        self._prepare_atom_permutation_buffers()
+        self._upload_atom_permutation_buffer()
+        self._upload_canonical_atom_buffers()
+
+    def _prepare_atom_permutation_buffers(self) -> None:
+        required_bytes = max(4, int(self._visible_atom_indices_gpu.nbytes))
+        for index, buffer in enumerate(self._atom_index_vbos):
+            if not buffer.isCreated() or self._atom_index_buffer_sizes[index] == required_bytes:
+                continue
+            buffer.bind()
+            buffer.setUsagePattern(QOpenGLBuffer.UsagePattern.DynamicDraw)
+            buffer.allocate(required_bytes)
+            self._atom_index_buffer_sizes[index] = required_bytes
+
+    def _upload_atom_permutation_buffer(self) -> None:
         if self._program is None or not self._vao.isCreated():
             return
         self._program.bind()
         self._vao.bind()
 
-        self._atom_index_vbo.bind()
-        self._atom_index_vbo.setUsagePattern(QOpenGLBuffer.UsagePattern.StaticDraw)
-        self._atom_index_vbo.allocate(
-            self._visible_atom_indices_gpu.tobytes(),
-            self._visible_atom_indices_gpu.nbytes,
-        )
+        next_index = (self._atom_index_buffer_index + 1) % len(self._atom_index_vbos)
+        self._atom_index_vbo = self._atom_index_vbos[next_index]
+        required_bytes = max(4, int(self._visible_atom_indices_gpu.nbytes))
+        if self._atom_index_buffer_sizes[next_index] != required_bytes:
+            self._atom_index_vbo.bind()
+            self._atom_index_vbo.setUsagePattern(QOpenGLBuffer.UsagePattern.DynamicDraw)
+            self._atom_index_vbo.allocate(required_bytes)
+            self._atom_index_buffer_sizes[next_index] = required_bytes
+        if self._visible_atom_indices_gpu.nbytes:
+            self._write_buffer(self._atom_index_vbo, self._visible_atom_indices_gpu)
+        else:
+            self._atom_index_vbo.bind()
+        self._atom_index_buffer_index = next_index
         self._program.enableAttributeArray(1)
         self._program.setAttributeBuffer(1, GL_FLOAT, 0, 1, 0)
         self._gl.glVertexAttribDivisor(1, 1)
 
-        self._radius_vbo.bind()
-        self._radius_vbo.setUsagePattern(QOpenGLBuffer.UsagePattern.StaticDraw)
-        self._radius_vbo.allocate(self._visible_radii.tobytes(), self._visible_radii.nbytes)
-        self._program.enableAttributeArray(2)
-        self._program.setAttributeBuffer(2, GL_FLOAT, 0, 1, 0)
-        self._gl.glVertexAttribDivisor(2, 1)
-
-        self._color_vbo.bind()
-        self._color_vbo.setUsagePattern(QOpenGLBuffer.UsagePattern.StaticDraw)
-        self._color_vbo.allocate(self._visible_colors.tobytes(), self._visible_colors.nbytes)
-        self._program.enableAttributeArray(3)
-        self._program.setAttributeBuffer(3, GL_FLOAT, 0, 3, 0)
-        self._gl.glVertexAttribDivisor(3, 1)
-
-        self._atom_unwrap_anchor_vbo.bind()
-        self._atom_unwrap_anchor_vbo.setUsagePattern(
-            QOpenGLBuffer.UsagePattern.StaticDraw
-        )
-        self._atom_unwrap_anchor_vbo.allocate(
-            self._visible_unwrap_anchor_indices_gpu.tobytes(),
-            self._visible_unwrap_anchor_indices_gpu.nbytes,
-        )
-        self._program.enableAttributeArray(8)
-        self._program.setAttributeBuffer(8, GL_FLOAT, 0, 1, 0)
-        self._gl.glVertexAttribDivisor(8, 1)
-
         self._vao.release()
         self._program.release()
+
+    def _upload_canonical_atom_buffers(self) -> None:
+        if self._program is None:
+            return
+        anchor_indices = np.ascontiguousarray(
+            self._atom_unwrap_anchor_indices,
+            dtype=np.float32,
+        )
+        self._upload_atom_texture_buffer(
+            self._radius_vbo,
+            self._radius_texture,
+            self._radii,
+            GL_R32F,
+            empty_bytes=4,
+        )
+        self._upload_atom_texture_buffer(
+            self._color_vbo,
+            self._color_texture,
+            self._colors,
+            GL_RGB32F,
+            empty_bytes=12,
+        )
+        self._upload_atom_texture_buffer(
+            self._atom_unwrap_anchor_vbo,
+            self._atom_unwrap_anchor_texture,
+            anchor_indices,
+            GL_R32F,
+            empty_bytes=4,
+        )
+
+    def _upload_atom_texture_buffer(
+        self,
+        buffer: QOpenGLBuffer,
+        texture: QOpenGLTexture | None,
+        array: np.ndarray,
+        internal_format: int,
+        *,
+        empty_bytes: int,
+    ) -> None:
+        if texture is None or not texture.isCreated() or not buffer.isCreated():
+            return
+        buffer.bind()
+        buffer.setUsagePattern(QOpenGLBuffer.UsagePattern.StaticDraw)
+        if array.nbytes:
+            buffer.allocate(array.tobytes(), int(array.nbytes))
+        else:
+            buffer.allocate(int(empty_bytes))
+        self._gl.glBindTexture(GL_TEXTURE_BUFFER, texture.textureId())
+        self._gl.glTexBuffer(GL_TEXTURE_BUFFER, internal_format, buffer.bufferId())
+        self._gl.glBindTexture(GL_TEXTURE_BUFFER, 0)
 
     def _allocate_position_buffer(self) -> None:
         if self._program is None or not self._vao.isCreated():
@@ -1484,12 +1623,17 @@ class MoleculeGLWidget(QOpenGLWidget):
     def _set_visible_atom_arrays(self, indices: np.ndarray) -> None:
         self._visible_atom_indices = np.ascontiguousarray(indices, dtype=np.int32)
         self._visible_atom_count = int(indices.shape[0])
+        self._all_atoms_visible = self._visible_atom_count == self._atom_count
+        self._has_unwrap_anchors = bool(
+            np.any(self._atom_unwrap_anchor_indices[self._visible_atom_indices] >= 0)
+        )
         self._atom_visible_mask = np.zeros(self._atom_count, dtype=np.bool_)
         self._atom_visible_mask[indices] = True
         self._depth_order_dirty = True
         self._rebuild_render_atom_arrays()
 
     def _rebuild_render_atom_arrays(self) -> None:
+        depth_order_started_s = time.perf_counter()
         indices = self._visible_atom_indices
         render_indices = indices
         if (
@@ -1507,21 +1651,36 @@ class MoleculeGLWidget(QOpenGLWidget):
                 ],
                 dtype=np.float32,
             )
-            view_depth = self._display_positions(indices) @ camera_forward
-            if view_depth.size >= COARSE_DEPTH_SORT_ATOMS:
-                order = coarse_depth_order(view_depth)
+            display_positions = self._display_positions(indices)
+            if indices.size >= COARSE_DEPTH_SORT_ATOMS:
+                order = (
+                    coarse_position_depth_order(display_positions, camera_forward)
+                    if self._all_atoms_visible and not self._has_unwrap_anchors
+                    else coarse_depth_order(display_positions @ camera_forward)
+                )
             else:
+                view_depth = display_positions @ camera_forward
                 order = np.argsort(view_depth, kind="stable")[::-1]
-            render_indices = indices[order]
+            render_indices = order if self._all_atoms_visible else indices[order]
+        self._last_depth_order_ms = (
+            time.perf_counter() - depth_order_started_s
+        ) * 1000.0
+        array_rebuild_started_s = time.perf_counter()
         self._render_atom_indices = np.ascontiguousarray(render_indices, dtype=np.int32)
         self._visible_atom_indices_gpu = np.ascontiguousarray(render_indices, dtype=np.float32)
-        self._visible_unwrap_anchor_indices_gpu = np.ascontiguousarray(
-            self._atom_unwrap_anchor_indices[render_indices],
-            dtype=np.float32,
-        )
-        self._visible_radii = np.ascontiguousarray(self._radii[render_indices], dtype=np.float32)
-        self._visible_colors = np.ascontiguousarray(self._colors[render_indices], dtype=np.float32)
+        self._last_array_rebuild_ms = (
+            time.perf_counter() - array_rebuild_started_s
+        ) * 1000.0
+        self._last_depth_sort_ms = self._last_depth_order_ms + self._last_array_rebuild_ms
         self._depth_order_dirty = False
+
+    @staticmethod
+    def _create_buffer_texture(label: str) -> QOpenGLTexture:
+        texture = QOpenGLTexture(QOpenGLTexture.Target.TargetBuffer)
+        if not texture.create():
+            raise RuntimeError(f"Failed to create GPU {label} buffer texture")
+        return texture
+
     def _rebuild_visible_bonds(self) -> None:
         if self._bond_pairs.size == 0 or self._atom_visible_mask.size == 0:
             visible_pairs = np.empty((0, 2), dtype=np.int32)
@@ -1552,14 +1711,11 @@ class MoleculeGLWidget(QOpenGLWidget):
         ).reshape(bond_count, 6)
 
     def _display_positions(self, indices: np.ndarray) -> np.ndarray:
-        anchor_indices = self._atom_unwrap_anchor_indices[indices]
-        if (
-            not np.any(anchor_indices >= 0)
-            or not self._periodic_cell_valid
-        ):
+        if not self._has_unwrap_anchors or not self._periodic_cell_valid:
             if indices.size == self._atom_count:
                 return self._positions
             return np.ascontiguousarray(self._positions[indices], dtype=np.float32)
+        anchor_indices = self._atom_unwrap_anchor_indices[indices]
         return unwrap_positions_by_anchor_indices(
             self._positions,
             indices,

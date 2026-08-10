@@ -128,6 +128,84 @@ class RandomAccessCacheTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_extxyz_first_display_reuses_initial_metadata_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "first-frame.extxyz"
+            write(
+                source,
+                [Atoms("HC", positions=[[0, 0, 0], [1, 0, 0]])],
+                format="extxyz",
+            )
+
+            from trajplayer import random_access_cache
+
+            with patch.object(
+                random_access_cache,
+                "read_xyz_frame",
+                wraps=random_access_cache.read_xyz_frame,
+            ) as decode:
+                store = open_direct_random_access_store(TrajectorySource(source))
+                try:
+                    positions = np.empty((2, 3), dtype=np.float32)
+                    store.read_frame_into(0, positions, None)
+                    self.assertEqual(decode.call_count, 1)
+                    np.testing.assert_allclose(positions, [[0, 0, 0], [1, 0, 0]])
+                finally:
+                    store.close()
+
+    def test_extxyz_index_construction_failure_releases_source_handles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "failed-index.extxyz"
+            write(source, [Atoms("H", positions=[[0, 0, 0]])], format="extxyz")
+
+            with patch(
+                "trajplayer.random_access_cache.ProgressiveXyzIndex",
+                side_effect=RuntimeError("index failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "index failed"):
+                    open_direct_random_access_store(TrajectorySource(source))
+
+            renamed = source.with_name("released.extxyz")
+            source.replace(renamed)
+            self.assertTrue(renamed.is_file())
+
+    def test_extxyz_native_reader_writes_later_frame_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "native.extxyz"
+            frames = [
+                Atoms("HC", positions=[[index, 0, 0], [0, index + 1, 0]])
+                for index in range(2)
+            ]
+            write(source, frames, format="extxyz")
+
+            def fake_native(_source, **kwargs):
+                np.copyto(
+                    kwargs["positions"],
+                    np.asarray(frames[1].positions, dtype=np.float32),
+                )
+                return True
+
+            with (
+                patch("trajplayer.random_access_cache.NATIVE_XYZ_READ_AVAILABLE", True),
+                patch(
+                    "trajplayer.random_access_cache.xyz_read_frame_into",
+                    side_effect=fake_native,
+                ) as native_read,
+            ):
+                store = open_direct_random_access_store(TrajectorySource(source))
+                try:
+                    count = store.frame_count
+                    while not store.frame_count_is_final:
+                        count, _complete = store.wait_for_index_update(count, timeout_s=1.0)
+                    positions = np.empty((2, 3), dtype=np.float32)
+                    store.read_frame_into(1, positions, None)
+                    native_read.assert_called_once()
+                    np.testing.assert_allclose(positions, frames[1].positions)
+                    self.assertEqual(store.reader.native_read_count, 1)
+                    self.assertEqual(store.reader.python_read_count, 0)
+                finally:
+                    store.close()
+
     def test_extxyz_progressive_index_publishes_final_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "progressive.extxyz"

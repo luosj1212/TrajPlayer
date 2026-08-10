@@ -76,6 +76,7 @@ def benchmark_open(
                 "has_cells": store.has_cells,
                 "first_frame_bytes": int(positions.nbytes + (0 if cell is None else cell.nbytes)),
                 "reader_root": store.root.name,
+                **_reader_path_details(store),
             }
         finally:
             store.close()
@@ -155,6 +156,7 @@ def benchmark_seek(
             "frame_count_is_final": store.frame_count_is_final,
             "has_cells": store.has_cells,
             "frame_bytes": frame_bytes,
+            **_reader_path_details(store),
         }
         return report
     finally:
@@ -253,6 +255,7 @@ def benchmark_soak(
             "frame_count": store.frame_count,
             "frame_count_is_final": store.frame_count_is_final,
             "has_cells": store.has_cells,
+            **_reader_path_details(store),
         }
         return report
     finally:
@@ -275,6 +278,21 @@ def _wait_for_index(store, *, timeout_s: float) -> None:
             known_count,
             timeout_s=min(0.2, remaining_s),
         )
+
+
+def _reader_path_details(store) -> dict[str, object]:
+    reader = store.reader
+    return {
+        "direct_read_into": bool(store.metadata.get("direct_read_into", False)),
+        "native_xyz_read_available": bool(
+            store.metadata.get("native_xyz_read_into", False)
+        ),
+        "native_xyz_reads": int(getattr(reader, "native_read_count", 0)),
+        "python_xyz_reads": int(getattr(reader, "python_read_count", 0)),
+        "prefetched_first_frame_reads": int(
+            getattr(reader, "prefetched_read_count", 0)
+        ),
+    }
 
 
 def _seek_indices(

@@ -39,6 +39,8 @@ continue in the specialized tools users already prefer.
 - OpenGL instanced atoms and bonds with no per-atom CPU drawing loop
 - Direct random-access readers for ASE `.traj`, XYZ/extXYZ, GRO, PDB, CIF,
   XTC, and TRR
+- Native common-case XYZ/extXYZ parsing directly into the streamer's contiguous
+  float32 frame slab, with a Python fallback for unusual layouts
 - Progressive XYZ indexing: frame 1 opens before the full file scan finishes
 - Background streaming, direction-aware prefetch, and a unified 64-256 MiB
   memory budget with I/O latency and cache-hit telemetry
@@ -50,6 +52,7 @@ continue in the specialized tools users already prefer.
 - Periodic box display and connected-chain or individual-atom isolation;
   chain lists and ranges can be entered as `1,3-5`
 - Explicit bond-source status with optional static frame-1 inference
+- Responsive inspector layout with runtime Chinese and English interfaces
 - Portable Windows x64, Linux x86_64, and macOS Apple Silicon/Intel packages
 - Lightweight Chemfiles structure/Gromacs backend and optional native `trajcore`
   hot paths; portable builds do not bundle SciPy or MDAnalysis
@@ -63,7 +66,7 @@ are different from the source archive offered by **Code > Download ZIP**.
 ### Windows Portable Package
 
 1. Open GitHub Releases and download
-   `TrajPlayer-Windows-x64-v0.1.0-alpha.8.zip`, not the source-code ZIP.
+   `TrajPlayer-Windows-x64-v0.1.0-alpha.9.zip`, not the source-code ZIP.
 2. Extract the archive completely.
 3. Run `TrajPlayer\TrajPlayer.exe` from the extracted directory.
 4. Use **Open** or drag trajectory files into the application window.
@@ -88,7 +91,7 @@ extracted `TrajPlayer` folder and run:
 
 ### Linux Portable Package
 
-Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.8.tar.gz` from GitHub Releases
+Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.9.tar.gz` from GitHub Releases
 and extract the complete archive. Python is not required. Then run:
 
 ```bash
@@ -106,8 +109,8 @@ Generate the same report with
 Download the ZIP that matches the Mac:
 
 - Apple Silicon (M1 or newer):
-  `TrajPlayer-macOS-arm64-v0.1.0-alpha.8.zip`
-- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.8.zip`
+  `TrajPlayer-macOS-arm64-v0.1.0-alpha.9.zip`
+- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.9.zip`
 
 Extract the complete ZIP, then open `TrajPlayer-macOS/TrajPlayer.app`. Python
 and Conda are not required. The app can be moved to `/Applications` as a whole;
@@ -222,14 +225,15 @@ architecture.
 flowchart LR
     UI["Qt view + QAction commands"] --> P["Playback clock"]
     P --> Q["Generation-safe present scheduler"]
-    D["Direct trajectory reader"] --> S["Adaptive RAM frame cache"]
-    D -. optional .-> C["Persistent/index cache"]
-    S --> L["Read-only frame lease"]
+    D["Direct trajectory reader"] --> S["Caller-owned float32 frame slab"]
+    S --> M["Adaptive RAM frame cache"]
+    D -. optional .-> K["Persistent/index cache"]
+    M --> L["Read-only frame lease"]
     L --> T["Exact render ticket"]
-    T --> G["OpenGL upload buffers"]
+    T --> G["Position ring + canonical atom attributes"]
     G --> R["Instanced atom and bond draws"]
-    R --> C["paint-confirmed ticket"]
-    C --> A["frameSwapped acknowledgement"]
+    R --> V["paint-confirmed ticket"]
+    V --> A["frameSwapped acknowledgement"]
     A --> P
 ```
 
@@ -266,6 +270,14 @@ python app.py --benchmark-output=benchmark.json --benchmark-atoms=100000 \
 ```
 
 Generated benchmark stores and reports are ignored by Git.
+
+The native text-parser and bond-selection hot paths can be measured separately:
+
+```bash
+python scripts/bench_xyz_parser.py --atoms 1000000 --repeat 3
+python scripts/bench_valence_selection.py --atoms 200000 \
+  --candidates 1000000 --repeats 3
+```
 
 Real local files can be measured separately from the synthetic GPU scene:
 
@@ -330,7 +342,8 @@ python scripts/doctor.py --output trajplayer-diagnostics.json
 Regenerate the README screenshot after UI changes with:
 
 ```bash
-python scripts/capture_readme.py examples/c60.extxyz docs/images/trajplayer.png
+python scripts/capture_readme.py examples/c60.extxyz docs/images/trajplayer.png \
+  --language=en
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and

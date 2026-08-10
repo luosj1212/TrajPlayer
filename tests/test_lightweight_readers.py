@@ -8,12 +8,31 @@ import numpy as np
 from ase import Atoms
 from ase.io.trajectory import Trajectory
 
+from trajplayer.ase_traj_reader import AseUlmTrajectoryReader
+from trajplayer.gromacs_reader import ChemfilesGromacsReader
 from trajplayer.random_access_cache import open_direct_random_access_store
 from trajplayer.structure_reader import read_cif, read_gro, read_pdb
 from trajplayer.trajectory_source import TrajectorySource
 
 
 class LightweightReaderTests(unittest.TestCase):
+    def test_ase_reader_reuses_the_frame_decoded_during_initialization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "first-frame.traj"
+            with Trajectory(str(path), "w") as trajectory:
+                trajectory.write(Atoms("H", positions=[[1.0, 2.0, 3.0]]))
+
+            reader = AseUlmTrajectoryReader(path)
+            try:
+                with patch.object(reader, "_read_item", wraps=reader._read_item) as decode:
+                    first, _cell = reader.read_frame(0)
+                    self.assertEqual(decode.call_count, 0)
+                    np.testing.assert_allclose(first, [[1.0, 2.0, 3.0]])
+                    reader.read_frame(0)
+                    self.assertEqual(decode.call_count, 1)
+            finally:
+                reader.close()
+
     def test_ase_traj_reader_does_not_import_ase_io_or_scipy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "two-frames.traj"

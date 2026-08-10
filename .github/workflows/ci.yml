@@ -47,7 +47,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          python -c "from trajplayer.trajcore import NATIVE_AVAILABLE, NATIVE_DEPTH_ORDER_AVAILABLE; assert NATIVE_AVAILABLE and NATIVE_DEPTH_ORDER_AVAILABLE"
+          python -c "from trajplayer.trajcore import NATIVE_FULL_AVAILABLE; assert NATIVE_FULL_AVAILABLE"
           python -m pytest -q
 
       - name: Exercise every trajectory reader

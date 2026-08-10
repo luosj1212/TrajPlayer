@@ -5,6 +5,35 @@ All notable changes to TrajPlayer are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.0-alpha.9] - 2026-08-10
+
+### Added
+
+- Added a responsive right-side inspector, compact transport bar, collapsible
+  advanced controls, and runtime Chinese/English interface switching
+- Added a five-second camera spin/stop benchmark with separate depth-order,
+  array-rebuild, static-upload, and first-post-interaction timing
+- Added standalone million-atom XYZ parser and million-candidate valence
+  selection benchmarks
+
+### Changed
+
+- Moved common XYZ/extXYZ atom-row parsing into native `trajcore`, writing
+  directly into the streamer's contiguous float32 slab while retaining the
+  Python fallback for unusual `Properties` layouts
+- Reused the metadata read of frame 1 for initial display in ASE, XYZ/extXYZ,
+  XTC, and TRR readers instead of decoding it twice
+- Kept canonical atom color, radius, and periodic-anchor attributes on the GPU;
+  deferred camera sorting now rebuilds and uploads only an atom permutation
+- Moved bond-candidate sorting and valence-cap selection into native code while
+  preserving the existing shortest-first greedy result
+- Strengthened packaged native smoke tests to require every alpha.9 hot path
+
+### Fixed
+
+- Closed XYZ source mappings when progressive-index construction fails
+- Included the macOS build helper in WSL's isolated Linux release workspace
+
 ## [0.1.0-alpha.8] - 2026-08-10
 
 ### Changed
@@ -149,7 +178,8 @@ All notable changes to TrajPlayer are documented here. The project follows
 - Windows x64 and Linux x86_64 portable packaging
 - Cross-platform tests, CI, release automation, and dependency license collection
 
-[Unreleased]: https://github.com/luosj1212/TrajPlayer/compare/v0.1.0-alpha.8...HEAD
+[Unreleased]: https://github.com/luosj1212/TrajPlayer/compare/v0.1.0-alpha.9...HEAD
+[0.1.0-alpha.9]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.9
 [0.1.0-alpha.8]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.8
 [0.1.0-alpha.7]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.6

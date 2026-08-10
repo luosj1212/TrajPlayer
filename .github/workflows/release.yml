@@ -57,7 +57,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          python -c "from trajplayer.trajcore import NATIVE_AVAILABLE, NATIVE_DEPTH_ORDER_AVAILABLE; assert NATIVE_AVAILABLE and NATIVE_DEPTH_ORDER_AVAILABLE"
+          python -c "from trajplayer.trajcore import NATIVE_FULL_AVAILABLE; assert NATIVE_FULL_AVAILABLE"
           python -m pytest -q
           python scripts/check_release.py
 
@@ -141,6 +141,8 @@ jobs:
         run: |
           xvfb-run -a ./dist/TrajPlayer/TrajPlayer --benchmark-output=performance-${{ matrix.label }}.json --benchmark-atoms=100000 --benchmark-frames=64 --benchmark-render-frames=120 --benchmark-bonds --benchmark-finish-gpu
           python scripts/check_perf_report.py performance-${{ matrix.label }}.json
+          xvfb-run -a ./dist/TrajPlayer/TrajPlayer --benchmark-output=performance-camera-${{ matrix.label }}.json --benchmark-atoms=100000 --benchmark-frames=64 --benchmark-bonds --benchmark-finish-gpu --benchmark-camera-spin-seconds=5
+          python -c "import json; r=json.load(open('performance-camera-${{ matrix.label }}.json')); assert r['render']['post_interaction_frame_ms_samples'] >= 1"
 
       - name: Smoke-test macOS app bundle
         if: runner.os == 'macOS'
@@ -161,6 +163,8 @@ jobs:
         run: |
           ./dist/TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer --benchmark-output=performance-${{ matrix.label }}.json --benchmark-atoms=100000 --benchmark-frames=64 --benchmark-render-frames=30 --benchmark-bonds --benchmark-finish-gpu
           python scripts/check_perf_report.py performance-${{ matrix.label }}.json
+          ./dist/TrajPlayer-macOS/TrajPlayer.app/Contents/MacOS/TrajPlayer --benchmark-output=performance-camera-${{ matrix.label }}.json --benchmark-atoms=100000 --benchmark-frames=64 --benchmark-bonds --benchmark-finish-gpu --benchmark-camera-spin-seconds=5
+          python -c "import json; r=json.load(open('performance-camera-${{ matrix.label }}.json')); assert r['render']['post_interaction_frame_ms_samples'] >= 1"
 
       - name: Upload package artifact
         if: always()

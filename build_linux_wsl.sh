@@ -12,6 +12,7 @@ for file in \
     build_exe.bat \
     build_linux.sh \
     build_linux_wsl.sh \
+    build_macos.sh \
     CHANGELOG.md \
     CONTRIBUTING.md \
     DISTRIBUTION_README.txt \
