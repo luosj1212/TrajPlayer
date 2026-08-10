@@ -5,6 +5,21 @@ All notable changes to TrajPlayer are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8] - 2026-08-10
+
+### Changed
+
+- Replaced the million-atom depth-bin `stable argsort` with a native
+  `O(N + 256)` counting pass while preserving the previous far-to-near order
+- Added paint-confirmed `RenderTicket` ownership so unrelated OpenGL swaps
+  cannot acknowledge a pending trajectory frame
+- Made adaptive cache decisions use the selected playback FPS, decode deadline,
+  and a bounded process-RSS soft limit instead of assuming 60 FPS
+- Added real-file open, seek-storm, and no-skip streaming-soak benchmarks for
+  ASE, XYZ/extXYZ, and Gromacs trajectories
+- Extended relative performance comparison to understand real-file scenario
+  reports and warn when hardware or platform context differs
+
 ## [0.1.0-alpha.7] - 2026-08-09
 
 ### Changed
@@ -134,6 +149,8 @@ All notable changes to TrajPlayer are documented here. The project follows
 - Windows x64 and Linux x86_64 portable packaging
 - Cross-platform tests, CI, release automation, and dependency license collection
 
+[Unreleased]: https://github.com/luosj1212/TrajPlayer/compare/v0.1.0-alpha.8...HEAD
+[0.1.0-alpha.8]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.8
 [0.1.0-alpha.7]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.5

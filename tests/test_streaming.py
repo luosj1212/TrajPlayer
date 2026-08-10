@@ -11,6 +11,26 @@ from trajplayer.streaming import FrameStreamer
 
 
 class FrameStreamerTests(unittest.TestCase):
+    def test_streamer_reports_the_actual_playback_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with BinaryTrajectoryStore.create(
+                Path(tmp) / "playback-rate.tpdata",
+                frame_count=2,
+                atom_numbers=np.array([1], dtype=np.uint16),
+                symbols=["H"],
+                source_path=None,
+                source_mtime_ns=0,
+                source_size=0,
+            ) as store:
+                streamer = FrameStreamer(store, prefetch_radius=0)
+                streamer.set_playback_fps(24.0)
+
+                stats = streamer.stats_snapshot()
+
+                self.assertEqual(stats.playback_fps, 24.0)
+                self.assertAlmostEqual(stats.decode_deadline_ms, 1000.0 / 24.0)
+                self.assertGreater(stats.process_rss_soft_limit_bytes, 0)
+
     def test_prefetch_respects_dynamic_target_before_latency_samples_exist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with BinaryTrajectoryStore.create(

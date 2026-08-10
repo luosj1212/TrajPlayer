@@ -18,6 +18,7 @@ from .memory_budget import (
     MemorySnapshot,
     ViewerMemoryAllocation,
     available_memory_bytes,
+    choose_process_rss_soft_limit,
 )
 from .process_memory import process_memory_snapshot
 from .telemetry import RollingLatency
@@ -54,6 +55,9 @@ class FrameStreamerStats:
     allocated_cache_bytes: int
     memory_target_bytes: int
     memory_target_reason: str
+    playback_fps: float
+    decode_deadline_ms: float
+    process_rss_soft_limit_bytes: int
 
     @property
     def cache_hit_rate(self) -> float:
@@ -95,6 +99,10 @@ class FrameLease:
     @property
     def released(self) -> bool:
         return self._owner is None
+
+    @property
+    def epoch(self) -> int:
+        return self._epoch
 
     def release(self) -> None:
         owner = self._owner
@@ -223,9 +231,17 @@ class FrameStreamer:
         self._active_leases = 0
         self._peak_active_leases = 0
         self._stale_lease_releases = 0
+        self._playback_fps = 0.0
+        initial_rss_bytes = process_memory_snapshot().rss_bytes
+        self._process_rss_soft_limit_bytes = choose_process_rss_soft_limit(
+            available_bytes=self.memory_budget.available_memory_bytes,
+            current_rss_bytes=initial_rss_bytes,
+            cache_ceiling_bytes=self.max_memory_bytes,
+        )
         self._memory_policy = MemoryBudgetPolicy(
             frame_bytes=self.frame_bytes,
             ceiling_bytes=self.max_memory_bytes,
+            process_rss_soft_limit_bytes=self._process_rss_soft_limit_bytes,
         )
         self._memory_target_bytes = (
             self.memory_bytes if self._dynamic_cache_enabled else self.max_memory_bytes
@@ -288,7 +304,22 @@ class FrameStreamer:
                 allocated_cache_bytes=self.memory_bytes,
                 memory_target_bytes=self._memory_target_bytes,
                 memory_target_reason=self._memory_target_reason,
+                playback_fps=self._playback_fps,
+                decode_deadline_ms=(
+                    0.0
+                    if self._playback_fps <= 0.0
+                    else 1000.0 / self._playback_fps
+                ),
+                process_rss_soft_limit_bytes=self._process_rss_soft_limit_bytes,
             )
+
+    def set_playback_fps(self, fps: float) -> None:
+        value = float(fps)
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError("playback_fps must be finite and non-negative")
+        with self._lock:
+            self._playback_fps = value
+            self._last_memory_policy_sample_s = 0.0
 
     def start(self) -> None:
         with self._lock:
@@ -733,6 +764,7 @@ class FrameStreamer:
             )
             current_bytes = self.memory_bytes
             latency_ms = self._load_latency_ewma_s * 1000.0
+            playback_fps = self._playback_fps
         available = available_memory_bytes()
         if available is None:
             available = self.memory_budget.available_memory_bytes
@@ -744,7 +776,7 @@ class FrameStreamer:
                 cache_hit_rate=hit_rate,
                 decode_latency_ms=latency_ms,
                 decode_mb_s=throughput,
-                playback_fps=60.0,
+                playback_fps=playback_fps,
                 interactive=bool(interactive),
             ),
             current_bytes=current_bytes,

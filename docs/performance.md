@@ -40,6 +40,47 @@ read p50/p95/p99; cadence; decode throughput; cache hit rate; and process RSS.
 Absolute timings vary by GPU and compositor, so same-machine relative results
 are the primary signal.
 
+## Real-File Scenarios
+
+The synthetic scene isolates renderer performance. Use the real-file runner to
+measure the reader, progressive index, seek, and streaming-cache paths with a
+representative local trajectory:
+
+```bash
+python scripts/bench_scenarios.py open --trajectory run.xtc \
+  --topology run.gro --repeat 5 --output perf/xtc-open.json
+
+python scripts/bench_scenarios.py seek --trajectory run.xtc \
+  --topology run.gro --samples 500 --pattern random \
+  --output perf/xtc-seek.json
+
+python scripts/bench_scenarios.py soak --trajectory run.xtc \
+  --topology run.gro --minutes 30 --fps 60 \
+  --output perf/xtc-soak.json
+```
+
+`open` records metadata, first-frame, and optional progressive-index latency.
+`seek` supports random, sequential, and alternating seek-storm patterns.
+`soak` consumes every frame in order, records deadline misses without skipping,
+and reports RSS slope, cache behavior, and lease invariants. OS file-cache state
+is recorded as unmanaged; cold and warm runs should therefore be labeled and
+collected separately by the operator.
+
+Compare reports for the same scenario with the existing relative tool:
+
+```bash
+python scripts/compare_perf.py perf/xtc-seek-baseline.json \
+  perf/xtc-seek-current.json --fail-regression-percent=10
+```
+
+The comparison warns when machine, processor, or platform metadata differs.
+
+Benchmark the native million-atom depth-order path independently with:
+
+```bash
+python scripts/bench_depth_order.py --atoms 1000000 --repeat 9 --require-native
+```
+
 ## Required JSON Groups
 
 - `startup`: process to QApplication, visible window, and first GL frame

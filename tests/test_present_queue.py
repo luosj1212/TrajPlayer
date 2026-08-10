@@ -1,19 +1,23 @@
 import unittest
 
 from trajplayer.playback import PlaybackEngine
-from trajplayer.present_scheduler import PresentScheduler
+from trajplayer.present_scheduler import PresentScheduler, RenderTicket
 
 
 class PresentSchedulerTests(unittest.TestCase):
     def test_scheduler_allows_only_one_frame_until_swap_acknowledgement(self) -> None:
         scheduler = PresentScheduler()
 
-        token = scheduler.submit(7, now_s=10.0)
+        token = scheduler.submit(7, lease_epoch=3, now_s=10.0)
         self.assertIsNotNone(token)
-        self.assertIsNone(scheduler.submit(8, now_s=10.1))
+        self.assertIsNone(scheduler.submit(8, lease_epoch=4, now_s=10.1))
         self.assertTrue(scheduler.has_pending_frame)
         self.assertEqual(scheduler.pending_frame, 7)
 
+        self.assertIsNone(scheduler.acknowledge_swap(now_s=10.011))
+        self.assertTrue(scheduler.has_pending_frame)
+        assert token is not None
+        self.assertTrue(scheduler.mark_painted(token))
         acknowledgement = scheduler.acknowledge_swap(now_s=10.012)
         self.assertIsNotNone(acknowledgement)
         assert acknowledgement is not None
@@ -22,16 +26,36 @@ class PresentSchedulerTests(unittest.TestCase):
         self.assertAlmostEqual(acknowledgement.latency_ms, 12.0)
         self.assertEqual(scheduler.displayed_frame, 7)
         self.assertFalse(scheduler.has_pending_frame)
-        self.assertIsNotNone(scheduler.submit(8, now_s=10.2))
+        self.assertIsNotNone(scheduler.submit(8, lease_epoch=4, now_s=10.2))
+
+    def test_only_the_exact_pending_ticket_can_be_marked_painted(self) -> None:
+        scheduler = PresentScheduler()
+        token = scheduler.submit(7, lease_epoch=11, now_s=1.0)
+        assert token is not None
+        unrelated = RenderTicket(
+            generation=token.generation,
+            sequence=token.sequence + 1,
+            frame_index=token.frame_index,
+            lease_epoch=token.lease_epoch,
+            submitted_at_s=token.submitted_at_s,
+        )
+
+        self.assertFalse(scheduler.mark_painted(unrelated))
+        self.assertIsNone(scheduler.acknowledge_swap(now_s=1.1))
+        self.assertTrue(scheduler.mark_painted(token))
+        self.assertEqual(scheduler.painted_ticket, token)
 
     def test_generation_change_discards_pending_submission(self) -> None:
         scheduler = PresentScheduler()
-        token = scheduler.submit(4, now_s=1.0)
+        token = scheduler.submit(4, lease_epoch=2, now_s=1.0)
+        assert token is not None
+        self.assertTrue(scheduler.mark_painted(token))
 
         generation = scheduler.begin_generation(target_frame=0)
 
         self.assertIsNotNone(token)
         self.assertEqual(generation, 1)
+        self.assertIsNone(scheduler.painted_ticket)
         self.assertIsNone(scheduler.acknowledge_swap(now_s=2.0))
         self.assertEqual(scheduler.displayed_frame, -1)
 

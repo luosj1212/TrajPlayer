@@ -100,7 +100,12 @@ class VisualDefaultTests(unittest.TestCase):
         renderer = Path("trajplayer/gl_view.py").read_text(encoding="utf-8")
 
         self.assertIn("self.gl_view.frameSwapped.connect(self.on_frame_swapped)", source)
-        self.assertIn("self.present_scheduler.submit(frame_index", source)
+        self.assertIn(
+            "self.gl_view.renderTicketPainted.connect(self.on_render_ticket_painted)",
+            source,
+        )
+        self.assertIn("self.present_scheduler.submit(", source)
+        self.assertIn("self.present_scheduler.mark_painted(ticket)", source)
         self.assertIn("self.present_scheduler.acknowledge_swap(", source)
         self.assertNotIn("set_immediate_paint", source)
         self.assertNotIn("self.repaint()", renderer)
@@ -135,6 +140,11 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn("self.playback_speed_slider.setValue(int(self.TARGET_FPS))", app_source)
         self.assertIn("def on_playback_speed_changed", app_source)
         self.assertIn("fps=float(self.playback_speed_slider.value())", app_source)
+        self.assertIn("self.streamer.set_playback_fps", app_source)
+        self.assertNotIn(
+            "playback_fps=60.0",
+            Path("trajplayer/streaming.py").read_text(encoding="utf-8"),
+        )
         self.assertIn("and self.displayed_frame == self.current_frame", app_source)
         self.assertIn("dropped_frames=0", engine_source)
 

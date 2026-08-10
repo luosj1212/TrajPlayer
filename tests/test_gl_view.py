@@ -240,6 +240,14 @@ class GlViewDefaultsTests(unittest.TestCase):
         self.assertNotIn("repaint", gl_view.MoleculeGLWidget.set_frame.__code__.co_names)
         self.assertIn("release_frame_reference", gl_view.MoleculeGLWidget.set_frame.__code__.co_names)
 
+    def test_render_ticket_is_emitted_only_after_the_frame_upload_is_painted(self) -> None:
+        paint_names = gl_view.MoleculeGLWidget.paintGL.__code__.co_names
+
+        self.assertIn("_pending_render_ticket", paint_names)
+        self.assertIn("renderTicketPainted", paint_names)
+        self.assertIn("emit", paint_names)
+        self.assertIn("render_ticket", gl_view.MoleculeGLWidget.set_frame.__code__.co_varnames)
+
     def test_camera_drag_defers_depth_sort_until_interaction_is_idle(self) -> None:
         move_names = gl_view.MoleculeGLWidget.mouseMoveEvent.__code__.co_names
 

@@ -19,6 +19,10 @@ DYNAMIC_CACHE_FLOOR_BYTES = 32 * MIB
 DYNAMIC_CACHE_STEP_BYTES = 32 * MIB
 DYNAMIC_GROW_HOLD_S = 5.0
 DYNAMIC_SHRINK_HOLD_S = 15.0
+MIN_PROCESS_RSS_SOFT_LIMIT_BYTES = 1024 * MIB
+MAX_PROCESS_RSS_SOFT_LIMIT_BYTES = 4 * 1024 * MIB
+PROCESS_RSS_AVAILABLE_FRACTION = 0.25
+DECODE_DEADLINE_HEADROOM_FRACTION = 0.75
 
 
 @dataclass(frozen=True)
@@ -65,9 +69,20 @@ class BudgetDecision:
 class MemoryBudgetPolicy:
     """Stateful cache-byte policy with fast pressure shrink and slow hysteresis."""
 
-    def __init__(self, *, frame_bytes: int, ceiling_bytes: int) -> None:
+    def __init__(
+        self,
+        *,
+        frame_bytes: int,
+        ceiling_bytes: int,
+        process_rss_soft_limit_bytes: int | None = None,
+    ) -> None:
         self.frame_bytes = max(1, int(frame_bytes))
         self.ceiling_bytes = max(self.frame_bytes, int(ceiling_bytes))
+        self.process_rss_soft_limit_bytes = (
+            None
+            if process_rss_soft_limit_bytes is None
+            else max(1, int(process_rss_soft_limit_bytes))
+        )
         self._grow_candidate_since_s: float | None = None
         self._shrink_candidate_since_s: float | None = None
 
@@ -98,13 +113,37 @@ class MemoryBudgetPolicy:
                 reason="memory-pressure",
             )
 
-        required_decode_mb_s = (
-            self.frame_bytes * max(1.0, snapshot.playback_fps) / MIB
+        if (
+            self.process_rss_soft_limit_bytes is not None
+            and snapshot.process_rss_bytes > self.process_rss_soft_limit_bytes
+        ):
+            self._grow_candidate_since_s = None
+            self._shrink_candidate_since_s = None
+            return BudgetDecision(
+                target_cache_bytes=max(floor, min(available_target, current // 2)),
+                reason="process-rss-pressure",
+            )
+
+        playback_fps = (
+            float(snapshot.playback_fps)
+            if snapshot.playback_fps > 0.0
+            else 0.0
+        )
+        scheduling_fps = max(1.0, playback_fps)
+        required_decode_mb_s = self.frame_bytes * scheduling_fps / MIB
+        frame_deadline_ms = 1000.0 / scheduling_fps
+        decode_deadline_risk = (
+            playback_fps > 0.0
+            and snapshot.decode_latency_ms
+            > frame_deadline_ms * DECODE_DEADLINE_HEADROOM_FRACTION
+        )
+        decode_throughput_headroom = (
+            snapshot.decode_mb_s > required_decode_mb_s * 1.2
         )
         can_grow = (
             not snapshot.interactive
             and snapshot.cache_hit_rate < 0.70
-            and snapshot.decode_mb_s > required_decode_mb_s * 1.2
+            and (decode_deadline_risk or decode_throughput_headroom)
             and current < available_target
         )
         if can_grow:
@@ -118,7 +157,11 @@ class MemoryBudgetPolicy:
                         available_target,
                         current + DYNAMIC_CACHE_STEP_BYTES,
                     ),
-                    reason="low-hit-rate-grow",
+                    reason=(
+                        "decode-deadline-grow"
+                        if decode_deadline_risk
+                        else "low-hit-rate-grow"
+                    ),
                 )
             return BudgetDecision(current, "grow-hysteresis")
 
@@ -137,6 +180,21 @@ class MemoryBudgetPolicy:
 
         self._shrink_candidate_since_s = None
         return BudgetDecision(current, "steady")
+
+
+def choose_process_rss_soft_limit(
+    *,
+    available_bytes: int,
+    current_rss_bytes: int,
+    cache_ceiling_bytes: int,
+) -> int:
+    available_share = int(max(0, available_bytes) * PROCESS_RSS_AVAILABLE_FRACTION)
+    working_limit = max(
+        MIN_PROCESS_RSS_SOFT_LIMIT_BYTES,
+        available_share,
+        max(0, int(current_rss_bytes)) + max(0, int(cache_ceiling_bytes)),
+    )
+    return min(MAX_PROCESS_RSS_SOFT_LIMIT_BYTES, working_limit)
 
 
 class MemoryBudgetManager:

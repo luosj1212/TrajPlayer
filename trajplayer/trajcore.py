@@ -15,6 +15,32 @@ else:
 
 
 NATIVE_AVAILABLE = _native is not None
+NATIVE_DEPTH_ORDER_AVAILABLE = _native is not None and hasattr(_native, "coarse_depth_order")
+DEPTH_BIN_COUNT = 256
+
+
+def coarse_depth_order(view_depth: np.ndarray) -> np.ndarray:
+    """Return the existing 256-bin far-to-near order, using native O(N) counting."""
+
+    depth = np.asarray(view_depth, dtype=np.float32)
+    if depth.ndim != 1:
+        raise ValueError("view_depth must be one-dimensional")
+    if _native is not None and hasattr(_native, "coarse_depth_order"):
+        return np.ascontiguousarray(_native.coarse_depth_order(depth), dtype=np.int64)
+    return _python_coarse_depth_order(depth)
+
+
+def _python_coarse_depth_order(depth: np.ndarray) -> np.ndarray:
+    if depth.size <= 1:
+        return np.arange(depth.size, dtype=np.int64)
+    minimum = float(np.min(depth))
+    maximum = float(np.max(depth))
+    span = maximum - minimum
+    if not np.isfinite(span) or span <= np.finfo(np.float32).eps:
+        return np.arange(depth.size - 1, -1, -1, dtype=np.int64)
+    scaled = (depth - minimum) * ((DEPTH_BIN_COUNT - 1) / span)
+    bins = np.asarray(np.clip(scaled, 0, DEPTH_BIN_COUNT - 1), dtype=np.uint8)
+    return np.argsort(bins, kind="stable")[::-1]
 
 
 def connected_components(

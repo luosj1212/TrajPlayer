@@ -4,6 +4,7 @@
 #include <Python.h>
 #include <numpy/arrayobject.h>
 
+#include <float.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -221,6 +222,94 @@ static PyObject *trajcore_connected_components(PyObject *self, PyObject *args) {
     }
     free(sizes_temp);
     return Py_BuildValue("NN", labels, sizes);
+}
+
+
+static PyObject *trajcore_coarse_depth_order(PyObject *self, PyObject *args) {
+    PyObject *depth_object;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "O", &depth_object)) return NULL;
+
+    PyArrayObject *depth = (PyArrayObject *)PyArray_FROM_OTF(
+        depth_object,
+        NPY_FLOAT32,
+        NPY_ARRAY_IN_ARRAY
+    );
+    if (depth == NULL) return NULL;
+    if (PyArray_NDIM(depth) != 1) {
+        Py_DECREF(depth);
+        PyErr_SetString(PyExc_ValueError, "view_depth must be one-dimensional");
+        return NULL;
+    }
+
+    npy_intp count = PyArray_DIM(depth, 0);
+    npy_intp output_dims[1] = {count};
+    PyArrayObject *order = (PyArrayObject *)PyArray_SimpleNew(1, output_dims, NPY_INT64);
+    if (order == NULL) {
+        Py_DECREF(depth);
+        return NULL;
+    }
+
+    float *values = (float *)PyArray_DATA(depth);
+    int64_t *output = (int64_t *)PyArray_DATA(order);
+    if (count <= 1) {
+        if (count == 1) output[0] = 0;
+        Py_DECREF(depth);
+        return (PyObject *)order;
+    }
+
+    npy_intp bin_counts[256] = {0};
+    npy_intp bin_offsets[256] = {0};
+    float minimum = values[0];
+    float maximum = values[0];
+    int valid_span = 1;
+
+    Py_BEGIN_ALLOW_THREADS
+    for (npy_intp index = 0; index < count; ++index) {
+        float value = values[index];
+        if (!isfinite(value)) {
+            valid_span = 0;
+            break;
+        }
+        if (value < minimum) minimum = value;
+        if (value > maximum) maximum = value;
+    }
+
+    double span = (double)maximum - (double)minimum;
+    if (!isfinite(span) || span <= (double)FLT_EPSILON) valid_span = 0;
+
+    if (valid_span) {
+        float scale = (float)(255.0 / span);
+        for (npy_intp index = 0; index < count; ++index) {
+            float scaled = (values[index] - minimum) * scale;
+            int bin = (int)scaled;
+            if (bin < 0) bin = 0;
+            else if (bin > 255) bin = 255;
+            bin_counts[bin] += 1;
+        }
+
+        npy_intp offset = 0;
+        for (int bin = 255; bin >= 0; --bin) {
+            bin_offsets[bin] = offset;
+            offset += bin_counts[bin];
+        }
+
+        for (npy_intp index = count; index-- > 0;) {
+            float scaled = (values[index] - minimum) * scale;
+            int bin = (int)scaled;
+            if (bin < 0) bin = 0;
+            else if (bin > 255) bin = 255;
+            output[bin_offsets[bin]++] = (int64_t)index;
+        }
+    } else {
+        for (npy_intp index = 0; index < count; ++index) {
+            output[index] = (int64_t)(count - 1 - index);
+        }
+    }
+    Py_END_ALLOW_THREADS
+
+    Py_DECREF(depth);
+    return (PyObject *)order;
 }
 
 
@@ -650,6 +739,12 @@ static PyObject *trajcore_candidate_pairs(PyObject *self, PyObject *args) {
 
 
 static PyMethodDef trajcore_methods[] = {
+    {
+        "coarse_depth_order",
+        trajcore_coarse_depth_order,
+        METH_VARARGS,
+        "Return a far-to-near stable reverse order using 256 counting bins."
+    },
     {
         "connected_components",
         trajcore_connected_components,

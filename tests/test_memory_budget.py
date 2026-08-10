@@ -53,6 +53,71 @@ class MemoryBudgetTests(unittest.TestCase):
         self.assertEqual(grown.target_cache_bytes, 96 * MIB)
         self.assertEqual(grown.reason, "low-hit-rate-grow")
 
+    def test_dynamic_policy_uses_actual_playback_rate_for_decode_headroom(self) -> None:
+        slow_policy = MemoryBudgetPolicy(frame_bytes=10 * MIB, ceiling_bytes=256 * MIB)
+        fast_policy = MemoryBudgetPolicy(frame_bytes=10 * MIB, ceiling_bytes=256 * MIB)
+
+        def snapshot(fps: float) -> MemorySnapshot:
+            return MemorySnapshot(
+                available_bytes=16 * 1024 * MIB,
+                process_rss_bytes=256 * MIB,
+                cache_hit_rate=0.2,
+                decode_latency_ms=1.0,
+                decode_mb_s=150.0,
+                playback_fps=fps,
+                interactive=False,
+            )
+
+        slow_policy.decide(snapshot(10.0), current_bytes=64 * MIB, now_s=1.0)
+        slow = slow_policy.decide(snapshot(10.0), current_bytes=64 * MIB, now_s=6.1)
+        fast = fast_policy.decide(snapshot(60.0), current_bytes=64 * MIB, now_s=6.1)
+
+        self.assertEqual(slow.target_cache_bytes, 96 * MIB)
+        self.assertEqual(slow.reason, "low-hit-rate-grow")
+        self.assertEqual(fast.target_cache_bytes, 64 * MIB)
+        self.assertEqual(fast.reason, "steady")
+
+    def test_dynamic_policy_uses_decode_deadline_risk(self) -> None:
+        policy = MemoryBudgetPolicy(frame_bytes=MIB, ceiling_bytes=256 * MIB)
+        snapshot = MemorySnapshot(
+            available_bytes=16 * 1024 * MIB,
+            process_rss_bytes=256 * MIB,
+            cache_hit_rate=0.2,
+            decode_latency_ms=20.0,
+            decode_mb_s=10.0,
+            playback_fps=60.0,
+            interactive=False,
+        )
+
+        policy.decide(snapshot, current_bytes=64 * MIB, now_s=1.0)
+        decision = policy.decide(snapshot, current_bytes=64 * MIB, now_s=6.1)
+
+        self.assertEqual(decision.target_cache_bytes, 96 * MIB)
+        self.assertEqual(decision.reason, "decode-deadline-grow")
+
+    def test_dynamic_policy_shrinks_when_process_rss_exceeds_soft_limit(self) -> None:
+        policy = MemoryBudgetPolicy(
+            frame_bytes=MIB,
+            ceiling_bytes=256 * MIB,
+            process_rss_soft_limit_bytes=400 * MIB,
+        )
+        decision = policy.decide(
+            MemorySnapshot(
+                available_bytes=16 * 1024 * MIB,
+                process_rss_bytes=512 * MIB,
+                cache_hit_rate=0.5,
+                decode_latency_ms=2.0,
+                decode_mb_s=100.0,
+                playback_fps=30.0,
+                interactive=False,
+            ),
+            current_bytes=256 * MIB,
+            now_s=1.0,
+        )
+
+        self.assertEqual(decision.target_cache_bytes, 128 * MIB)
+        self.assertEqual(decision.reason, "process-rss-pressure")
+
     def test_cgroup_v2_available_memory_respects_limit_and_usage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -3,10 +3,47 @@ from unittest.mock import patch
 
 import numpy as np
 
-from trajplayer.trajcore import candidate_pairs, connected_components
+from trajplayer import trajcore
+from trajplayer.trajcore import candidate_pairs, coarse_depth_order, connected_components
 
 
 class TrajcoreTests(unittest.TestCase):
+    def test_coarse_depth_order_matches_previous_stable_bin_order(self) -> None:
+        rng = np.random.default_rng(20260810)
+        depth = rng.normal(size=50_000).astype(np.float32)
+        depth[::127] = np.float32(0.25)
+        minimum = float(np.min(depth))
+        maximum = float(np.max(depth))
+        bins = np.asarray(
+            np.clip(
+                (depth - minimum) * ((trajcore.DEPTH_BIN_COUNT - 1) / (maximum - minimum)),
+                0,
+                trajcore.DEPTH_BIN_COUNT - 1,
+            ),
+            dtype=np.uint8,
+        )
+        expected = np.argsort(bins, kind="stable")[::-1]
+
+        np.testing.assert_array_equal(coarse_depth_order(depth), expected)
+
+    def test_coarse_depth_order_handles_degenerate_and_nonfinite_input(self) -> None:
+        np.testing.assert_array_equal(
+            coarse_depth_order(np.ones(5, dtype=np.float32)),
+            np.array([4, 3, 2, 1, 0], dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            coarse_depth_order(np.array([0.0, np.nan, 1.0], dtype=np.float32)),
+            np.array([2, 1, 0], dtype=np.int64),
+        )
+        with self.assertRaisesRegex(ValueError, "one-dimensional"):
+            coarse_depth_order(np.zeros((2, 2), dtype=np.float32))
+
+    def test_python_depth_fallback_matches_public_order(self) -> None:
+        depth = np.linspace(-2.0, 3.0, 1024, dtype=np.float32)
+        with patch("trajplayer.trajcore._native", None):
+            fallback = coarse_depth_order(depth)
+        np.testing.assert_array_equal(fallback, trajcore._python_coarse_depth_order(depth))
+
     def test_connected_components_returns_compact_stable_labels(self) -> None:
         labels, sizes = connected_components(
             7,

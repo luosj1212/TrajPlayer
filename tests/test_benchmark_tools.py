@@ -144,6 +144,33 @@ class BenchmarkToolTests(unittest.TestCase):
         self.assertTrue(any("startup.process_to_qapplication_ms" in error for error in errors))
         self.assertIn("render.frames must be positive", errors)
 
+    def test_real_seek_scenarios_use_their_own_relative_metrics(self) -> None:
+        baseline = {
+            "scenario": "seek",
+            "metrics": {
+                "frame_read_ms": {"p95": 10.0},
+                "decode_mib_s": 100.0,
+            },
+        }
+        current = {
+            "scenario": "seek",
+            "metrics": {
+                "frame_read_ms": {"p95": 12.0},
+                "decode_mib_s": 80.0,
+            },
+        }
+
+        regressions = compare_performance(
+            baseline,
+            current,
+            fail_regression_percent=10.0,
+        )
+
+        self.assertEqual(
+            {regression.metric for regression in regressions},
+            {"metrics.frame_read_ms.p95", "metrics.decode_mib_s"},
+        )
+
     def test_perf_report_rejects_duplicate_presentations(self) -> None:
         errors = performance_report_errors(
             {"pipeline": {"duplicate_frames": 1}, "timed_out": False}

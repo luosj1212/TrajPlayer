@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import numpy as np
 from shiboken6 import VoidPtr
-from PySide6.QtCore import QByteArray, QPoint, QTimer, Qt
+from PySide6.QtCore import QByteArray, QPoint, QTimer, Qt, Signal
 from PySide6.QtGui import QMatrix4x4, QMouseEvent, QSurfaceFormat, QVector3D, QWheelEvent
 from PySide6.QtOpenGL import (
     QOpenGLBuffer,
@@ -18,7 +18,9 @@ from PySide6.QtOpenGL import (
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from .element_style import atom_render_arrays
+from .present_scheduler import RenderTicket
 from .render_stats import RenderStats
+from .trajcore import DEPTH_BIN_COUNT, coarse_depth_order as _coarse_depth_order
 
 
 GL_FLOAT = 0x1406
@@ -39,7 +41,7 @@ GL_VERSION = 0x1F02
 POSITION_BUFFER_COUNT = 3
 DEPTH_SORT_IDLE_MS = 80
 COARSE_DEPTH_SORT_ATOMS = 250_000
-COARSE_DEPTH_BINS = 256
+COARSE_DEPTH_BINS = DEPTH_BIN_COUNT
 
 DEFAULT_BACKGROUND = (1.0, 1.0, 1.0, 1.0)
 BALL_STICK_ATOM_RADIUS_SCALE = 0.25
@@ -569,21 +571,9 @@ void main() {{
 
 
 def coarse_depth_order(view_depth: np.ndarray) -> np.ndarray:
-    """Return a far-to-near O(N) radix order using 256 depth bins."""
+    """Return the visual-compatible far-to-near 256-bin order."""
 
-    depth = np.asarray(view_depth, dtype=np.float32)
-    if depth.ndim != 1:
-        raise ValueError("view_depth must be one-dimensional")
-    if depth.size <= 1:
-        return np.arange(depth.size, dtype=np.int64)
-    minimum = float(np.min(depth))
-    maximum = float(np.max(depth))
-    span = maximum - minimum
-    if not math.isfinite(span) or span <= np.finfo(np.float32).eps:
-        return np.arange(depth.size - 1, -1, -1, dtype=np.int64)
-    scaled = (depth - minimum) * ((COARSE_DEPTH_BINS - 1) / span)
-    bins = np.asarray(np.clip(scaled, 0, COARSE_DEPTH_BINS - 1), dtype=np.uint8)
-    return np.argsort(bins, kind="stable")[::-1]
+    return _coarse_depth_order(view_depth)
 
 
 def default_surface_format() -> QSurfaceFormat:
@@ -599,6 +589,8 @@ def default_surface_format() -> QSurfaceFormat:
 
 class MoleculeGLWidget(QOpenGLWidget):
     """GPU instanced molecule view; Qt is only the host surface."""
+
+    renderTicketPainted = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -697,6 +689,7 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._last_depth_sort_ms = 0.0
         self._last_renderer_copy_bytes = 0
         self._frame_release: Callable[[], None] | None = None
+        self._pending_render_ticket: RenderTicket | None = None
         self._cleaning_up = False
         self._conservative_depth_enabled = False
         self._gl_vendor = "unknown"
@@ -934,6 +927,7 @@ class MoleculeGLWidget(QOpenGLWidget):
         reset_view: bool = False,
         cell: np.ndarray | None = None,
         release_callback: Callable[[], None] | None = None,
+        render_ticket: RenderTicket | None = None,
     ) -> None:
         frame = np.asarray(positions)
         if frame.shape != (self._atom_count, 3):
@@ -949,6 +943,7 @@ class MoleculeGLWidget(QOpenGLWidget):
         self.set_cell(cell)
         self._positions = frame
         self._frame_release = release_callback
+        self._pending_render_ticket = render_ticket
         self._frame_upload_pending = True
         if reset_view:
             self._fit_camera_to_frame(
@@ -963,6 +958,7 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._depth_sort_timer.stop()
         release = self._frame_release
         self._frame_release = None
+        self._pending_render_ticket = None
         if release is not None:
             release()
 
@@ -1146,6 +1142,7 @@ class MoleculeGLWidget(QOpenGLWidget):
             self._position_buffer_index = -1
             self._positions_uploaded = False
             self._frame_upload_pending = True
+            self._pending_render_ticket = None
             self._gl = None
             self._cleaning_up = False
 
@@ -1170,6 +1167,11 @@ class MoleculeGLWidget(QOpenGLWidget):
             self._upload_static_buffers()
         position_texture = (
             self._position_texture if self._positions_uploaded else None
+        )
+        painted_ticket = (
+            self._pending_render_ticket
+            if position_texture is not None and not self._frame_upload_pending
+            else None
         )
         paint_start = time.perf_counter()
         self._set_physical_viewport()
@@ -1259,6 +1261,9 @@ class MoleculeGLWidget(QOpenGLWidget):
                 depth_sort_ms=self._last_depth_sort_ms,
                 renderer_copy_bytes=self._last_renderer_copy_bytes,
             )
+        if painted_ticket is not None and painted_ticket == self._pending_render_ticket:
+            self._pending_render_ticket = None
+            self.renderTicketPainted.emit(painted_ticket)
 
     def _set_periodic_uniforms(
         self,

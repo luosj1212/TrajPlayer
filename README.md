@@ -63,7 +63,7 @@ are different from the source archive offered by **Code > Download ZIP**.
 ### Windows Portable Package
 
 1. Open GitHub Releases and download
-   `TrajPlayer-Windows-x64-v0.1.0-alpha.7.zip`, not the source-code ZIP.
+   `TrajPlayer-Windows-x64-v0.1.0-alpha.8.zip`, not the source-code ZIP.
 2. Extract the archive completely.
 3. Run `TrajPlayer\TrajPlayer.exe` from the extracted directory.
 4. Use **Open** or drag trajectory files into the application window.
@@ -88,7 +88,7 @@ extracted `TrajPlayer` folder and run:
 
 ### Linux Portable Package
 
-Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.7.tar.gz` from GitHub Releases
+Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.8.tar.gz` from GitHub Releases
 and extract the complete archive. Python is not required. Then run:
 
 ```bash
@@ -106,8 +106,8 @@ Generate the same report with
 Download the ZIP that matches the Mac:
 
 - Apple Silicon (M1 or newer):
-  `TrajPlayer-macOS-arm64-v0.1.0-alpha.7.zip`
-- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.7.zip`
+  `TrajPlayer-macOS-arm64-v0.1.0-alpha.8.zip`
+- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.8.zip`
 
 Extract the complete ZIP, then open `TrajPlayer-macOS/TrajPlayer.app`. Python
 and Conda are not required. The app can be moved to `/Applications` as a whole;
@@ -224,10 +224,12 @@ flowchart LR
     P --> Q["Generation-safe present scheduler"]
     D["Direct trajectory reader"] --> S["Adaptive RAM frame cache"]
     D -. optional .-> C["Persistent/index cache"]
-    S --> L["Frame lease"]
-    L --> G["OpenGL upload buffers"]
+    S --> L["Read-only frame lease"]
+    L --> T["Exact render ticket"]
+    T --> G["OpenGL upload buffers"]
     G --> R["Instanced atom and bond draws"]
-    R --> A["frameSwapped acknowledgement"]
+    R --> C["paint-confirmed ticket"]
+    C --> A["frameSwapped acknowledgement"]
     A --> P
 ```
 
@@ -237,7 +239,8 @@ progressive indexing, decoding, and bond inference remain off it. Random-access
 readers decode only the adaptive directional window and do not require a full
 decoded sidecar. A frame lease pins each RAM slot while the renderer owns the
 current frame, avoiding a second full-frame CPU copy.
-Playback advances only after `frameSwapped`, so slow hardware lowers cadence
+Playback advances only after the submitted ticket is painted and then receives
+its `frameSwapped` acknowledgement. Slow hardware therefore lowers cadence
 instead of skipping trajectory frames or blocking controls with synchronous
 painting.
 
@@ -263,6 +266,23 @@ python app.py --benchmark-output=benchmark.json --benchmark-atoms=100000 \
 ```
 
 Generated benchmark stores and reports are ignored by Git.
+
+Real local files can be measured separately from the synthetic GPU scene:
+
+```bash
+python scripts/bench_scenarios.py open --trajectory large.xtc \
+  --topology large.gro --repeat 5 --output xtc-open.json
+
+python scripts/bench_scenarios.py seek --trajectory huge.extxyz \
+  --samples 500 --pattern storm --output extxyz-seek.json
+
+python scripts/bench_scenarios.py soak --trajectory large.xtc \
+  --topology large.gro --minutes 30 --fps 60 --output xtc-soak.json
+```
+
+The real-file runner reads the supplied files in place and does not delete
+trajectory indexes or decoded data. Compare two reports from the same hardware
+with `scripts/compare_perf.py`.
 
 After building a portable package, inspect dependency-level bundle size with:
 

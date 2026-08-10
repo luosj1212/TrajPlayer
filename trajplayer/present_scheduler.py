@@ -13,16 +13,20 @@ class PlaybackClock(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class PresentToken:
+class RenderTicket:
     generation: int
     sequence: int
     frame_index: int
+    lease_epoch: int
     submitted_at_s: float
+
+
+PresentToken = RenderTicket
 
 
 @dataclass(frozen=True, slots=True)
 class PresentAcknowledgement:
-    token: PresentToken
+    token: RenderTicket
     latency_ms: float
     accepted: bool
 
@@ -35,7 +39,8 @@ class PresentScheduler:
         self._sequence = 0
         self._target_frame = 0
         self._displayed_frame = -1
-        self._pending: PresentToken | None = None
+        self._pending: RenderTicket | None = None
+        self._painted: RenderTicket | None = None
 
     @property
     def generation(self) -> int:
@@ -50,8 +55,12 @@ class PresentScheduler:
         return self._displayed_frame
 
     @property
-    def pending_token(self) -> PresentToken | None:
+    def pending_token(self) -> RenderTicket | None:
         return self._pending
+
+    @property
+    def painted_ticket(self) -> RenderTicket | None:
+        return self._painted
 
     @property
     def pending_frame(self) -> int | None:
@@ -66,6 +75,7 @@ class PresentScheduler:
         self._target_frame = int(target_frame)
         self._displayed_frame = -1
         self._pending = None
+        self._painted = None
         return self._generation
 
     def set_target_frame(self, frame_index: int) -> None:
@@ -79,24 +89,38 @@ class PresentScheduler:
 
         self._displayed_frame = int(frame_index)
 
-    def submit(self, frame_index: int, *, now_s: float) -> PresentToken | None:
+    def submit(
+        self,
+        frame_index: int,
+        *,
+        lease_epoch: int,
+        now_s: float,
+    ) -> RenderTicket | None:
         if self._pending is not None:
             return None
         self._sequence += 1
-        token = PresentToken(
+        token = RenderTicket(
             generation=self._generation,
             sequence=self._sequence,
             frame_index=int(frame_index),
+            lease_epoch=int(lease_epoch),
             submitted_at_s=float(now_s),
         )
         self._pending = token
         return token
 
+    def mark_painted(self, ticket: RenderTicket) -> bool:
+        if ticket != self._pending or ticket.generation != self._generation:
+            return False
+        self._painted = ticket
+        return True
+
     def acknowledge_swap(self, *, now_s: float) -> PresentAcknowledgement | None:
-        token = self._pending
+        token = self._painted
         if token is None:
             return None
         self._pending = None
+        self._painted = None
         accepted = token.generation == self._generation
         if accepted:
             self._displayed_frame = token.frame_index
@@ -106,9 +130,10 @@ class PresentScheduler:
             accepted=accepted,
         )
 
-    def clear_pending(self) -> PresentToken | None:
+    def clear_pending(self) -> RenderTicket | None:
         token = self._pending
         self._pending = None
+        self._painted = None
         return token
 
     def next_timer_delay_ms(

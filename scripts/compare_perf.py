@@ -46,6 +46,42 @@ ZERO_INVARIANTS = (
     "copies.renderer_full_frame_copy_bytes_per_frame",
 )
 
+SCENARIO_METRICS: dict[str, dict[str, Direction]] = {
+    "open": {
+        "metrics.metadata_ms.p50": "lower",
+        "metrics.metadata_ms.p95": "lower",
+        "metrics.first_frame_ms.p50": "lower",
+        "metrics.first_frame_ms.p95": "lower",
+        "metrics.index_complete_ms.p95": "lower",
+        "metrics.rss_mib": "lower",
+    },
+    "seek": {
+        "metrics.open_ms": "lower",
+        "metrics.frame_read_ms.p50": "lower",
+        "metrics.frame_read_ms.p95": "lower",
+        "metrics.frame_read_ms.p99": "lower",
+        "metrics.decode_mib_s": "higher",
+        "metrics.rss_mib": "lower",
+        "metrics.peak_rss_mib": "lower",
+    },
+    "soak": {
+        "metrics.cadence_fps": "higher",
+        "metrics.deadline_misses": "lower",
+        "metrics.wait_timeouts": "lower",
+        "metrics.cache_hit_rate": "higher",
+        "metrics.decode_mib_s": "higher",
+        "metrics.read_ms_p95": "lower",
+        "metrics.rss_end_mib": "lower",
+    },
+}
+
+SCENARIO_ZERO_INVARIANTS = {
+    "soak": (
+        "metrics.lease_balance",
+        "metrics.stale_lease_releases",
+    )
+}
+
 
 @dataclass(frozen=True, slots=True)
 class PerformanceRegression:
@@ -64,8 +100,17 @@ def compare_performance(
 ) -> list[PerformanceRegression]:
     if fail_regression_percent < 0.0:
         raise ValueError("fail_regression_percent must be non-negative")
+    baseline_scenario = _value_at_path(baseline, "scenario")
+    current_scenario = _value_at_path(current, "scenario")
+    if baseline_scenario != current_scenario:
+        raise ValueError(
+            f"benchmark scenarios differ: {baseline_scenario!r} != {current_scenario!r}"
+        )
+    scenario = baseline_scenario if isinstance(baseline_scenario, str) else None
+    metrics = SCENARIO_METRICS.get(scenario, METRICS)
+    zero_invariants = SCENARIO_ZERO_INVARIANTS.get(scenario, ZERO_INVARIANTS)
     regressions: list[PerformanceRegression] = []
-    for path, direction in METRICS.items():
+    for path, direction in metrics.items():
         baseline_value = _numeric_value(baseline, path)
         current_value = _numeric_value(current, path)
         if baseline_value is None or current_value is None or baseline_value <= 0.0:
@@ -85,7 +130,7 @@ def compare_performance(
                 )
             )
 
-    for path in ZERO_INVARIANTS:
+    for path in zero_invariants:
         current_value = _numeric_value(current, path)
         if current_value is not None and current_value != 0.0:
             regressions.append(
@@ -97,7 +142,7 @@ def compare_performance(
                     reason="zero invariant violated",
                 )
             )
-    if (
+    if scenario is None and (
         _value_at_path(baseline, "render.single_draw_call_per_frame") is True
         and _value_at_path(current, "render.single_draw_call_per_frame") is False
     ):
@@ -111,6 +156,19 @@ def compare_performance(
             )
         )
     return regressions
+
+
+def comparison_context_warnings(
+    baseline: dict[str, object],
+    current: dict[str, object],
+) -> list[str]:
+    warnings: list[str] = []
+    for path in ("environment.machine", "environment.processor", "environment.platform"):
+        baseline_value = _value_at_path(baseline, path)
+        current_value = _value_at_path(current, path)
+        if baseline_value is not None and current_value is not None and baseline_value != current_value:
+            warnings.append(f"{path} differs: {baseline_value!r} != {current_value!r}")
+    return warnings
 
 
 def _value_at_path(document: dict[str, object], path: str) -> object | None:
@@ -138,6 +196,8 @@ def main() -> None:
 
     baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
     current = json.loads(args.current.read_text(encoding="utf-8"))
+    for warning in comparison_context_warnings(baseline, current):
+        print(f"WARNING {warning}")
     regressions = compare_performance(
         baseline,
         current,

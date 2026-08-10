@@ -33,7 +33,7 @@ from trajplayer.commands import WindowCommands
 from trajplayer.gl_view import MoleculeGLWidget, default_surface_format
 from trajplayer.frame_store import FrameStore
 from trajplayer.playback import PlaybackEngine
-from trajplayer.present_scheduler import PresentScheduler
+from trajplayer.present_scheduler import PresentScheduler, RenderTicket
 from trajplayer.process_memory import ProcessMemorySnapshot, process_memory_snapshot
 from trajplayer.scrubbing import SliderScrubState
 from trajplayer.selection import (
@@ -168,6 +168,7 @@ class TrajPlayerWindow(MainWindowView):
 
         self.gl_view = MoleculeGLWidget()
         self.gl_view.frameSwapped.connect(self.on_frame_swapped)
+        self.gl_view.renderTicketPainted.connect(self.on_render_ticket_painted)
         self.stream_frame_ready.connect(self.on_stream_frame_ready)
         self.stream_failed.connect(self.on_stream_failed)
 
@@ -934,6 +935,8 @@ class TrajPlayerWindow(MainWindowView):
             loop=True,
         )
         self.playback.start(frame_index=0, now_s=time.perf_counter())
+        if self.streamer is not None:
+            self.streamer.set_playback_fps(self.TARGET_FPS)
         self.set_play_button_state(True)
         self.schedule_next_render_tick()
         self.benchmark_poll_timer.start()
@@ -994,6 +997,11 @@ class TrajPlayerWindow(MainWindowView):
                 "allocated_cache_bytes": streamer_stats.allocated_cache_bytes,
                 "memory_target_bytes": streamer_stats.memory_target_bytes,
                 "memory_target_reason": streamer_stats.memory_target_reason,
+                "playback_fps": streamer_stats.playback_fps,
+                "decode_deadline_ms": streamer_stats.decode_deadline_ms,
+                "process_rss_soft_limit_bytes": (
+                    streamer_stats.process_rss_soft_limit_bytes
+                ),
             }
         )
         frame_cache_bytes = self.streamer.memory_bytes if self.streamer is not None else 0
@@ -1170,6 +1178,7 @@ class TrajPlayerWindow(MainWindowView):
                 if decision.stop_playback:
                     self.set_play_button_state(False)
                     self.playback = None
+                    self.streamer.set_playback_fps(0.0)
             elif self.benchmark_diagnostics is not None:
                 self.benchmark_diagnostics.record_no_decision()
         elif self.playback is not None and self.playback.running:
@@ -1189,7 +1198,11 @@ class TrajPlayerWindow(MainWindowView):
             return
 
         frame_index = self.current_frame
-        present_token = self.present_scheduler.submit(frame_index, now_s=tick_time)
+        present_token = self.present_scheduler.submit(
+            frame_index,
+            lease_epoch=lease.epoch,
+            now_s=tick_time,
+        )
         if present_token is None:
             lease.release()
             return
@@ -1199,6 +1212,7 @@ class TrajPlayerWindow(MainWindowView):
                 reset_view=self.reset_view_on_next_frame,
                 cell=lease.cell,
                 release_callback=lease.release,
+                render_ticket=present_token,
             )
         except Exception:
             self.present_scheduler.clear_pending()
@@ -1208,6 +1222,9 @@ class TrajPlayerWindow(MainWindowView):
             self.benchmark_diagnostics.record_upload(timestamp_s=time.perf_counter())
         self.reset_view_on_next_frame = False
         self.schedule_next_render_tick()
+
+    def on_render_ticket_painted(self, ticket: RenderTicket) -> None:
+        self.present_scheduler.mark_painted(ticket)
 
     def on_frame_swapped(self) -> None:
         now_s = time.perf_counter()
@@ -1296,6 +1313,7 @@ class TrajPlayerWindow(MainWindowView):
             loop=self.loop_check.isChecked(),
         )
         self.playback.start(frame_index=self.current_frame, now_s=time.perf_counter())
+        self.streamer.set_playback_fps(float(self.playback_speed_slider.value()))
         self.set_play_button_state(True)
         self.schedule_next_render_tick()
 
@@ -1303,6 +1321,8 @@ class TrajPlayerWindow(MainWindowView):
         if self.playback is not None:
             self.playback.stop()
         self.playback = None
+        if self.streamer is not None:
+            self.streamer.set_playback_fps(0.0)
         self.set_play_button_state(False)
         if self.benchmark_output is None:
             self.render_timer.stop()
@@ -1336,6 +1356,7 @@ class TrajPlayerWindow(MainWindowView):
             loop=self.loop_check.isChecked(),
         )
         self.playback.start(frame_index=self.current_frame, now_s=time.perf_counter())
+        self.streamer.set_playback_fps(float(value))
         self.schedule_next_render_tick()
 
     def set_play_button_state(self, playing: bool) -> None:
@@ -1518,16 +1539,23 @@ def main() -> None:
     if cli_args.startup_smoke:
         return
     if cli_args.native_smoke:
-        from trajplayer.trajcore import NATIVE_AVAILABLE, NATIVE_IMPORT_ERROR
+        from trajplayer.trajcore import (
+            NATIVE_AVAILABLE,
+            NATIVE_DEPTH_ORDER_AVAILABLE,
+            NATIVE_IMPORT_ERROR,
+        )
 
-        if not NATIVE_AVAILABLE:
+        if not NATIVE_AVAILABLE or not NATIVE_DEPTH_ORDER_AVAILABLE:
             print(
-                "[native-smoke] trajplayer._trajcore is unavailable: "
-                f"{NATIVE_IMPORT_ERROR!r}",
+                "[native-smoke] trajplayer._trajcore or its depth-order entry "
+                f"is unavailable: {NATIVE_IMPORT_ERROR!r}",
                 flush=True,
             )
             raise SystemExit(2)
-        print("[native-smoke] trajplayer._trajcore is available", flush=True)
+        print(
+            "[native-smoke] trajplayer._trajcore depth ordering is available",
+            flush=True,
+        )
         return
     if cli_args.reader_smoke is not None:
         from trajplayer.reader_smoke import run_reader_smoke, write_reader_smoke_report
