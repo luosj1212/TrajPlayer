@@ -5,6 +5,42 @@ All notable changes to TrajPlayer are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.0-alpha.10] - 2026-08-12
+
+### Added
+
+- Added GPU atom picking with integer-ID, RGBA8, and vectorized CPU fallbacks;
+  canonical selections persist across frames and render through a compact GPU
+  selection texture
+- Added triclinic minimum-image distance, angle, and dihedral measurements,
+  pinned viewport annotations, and measurement-over-time analysis
+- Added a marker- and range-aware timeline linked bidirectionally to analysis
+  curves while retaining live coalesced scrubbing and sequential no-skip playback
+- Added cancellable background density, density-profile, MSD, RMSD, RMSF, COM,
+  and radius-of-gyration analysis with bounded frame slabs and disk-backed
+  windowed MSD storage
+- Added a dependency-free line/heatmap plot with min/max decimation, HiDPI data
+  caching, linear/log axes, zoom, tooltips, CSV/PNG export, and exact frame seek
+- Added recent trajectory sources, richer drag-and-drop feedback, current-frame
+  XYZ/extXYZ export, viewport screenshots, Light/Dark/System themes, and Qt
+  `.qm` Chinese/English translations
+
+### Changed
+
+- Expanded the responsive Inspector around Display, Visibility, Selection,
+  Measurement, Timeline, Analysis, Playback, and Interface workflows
+- Kept analysis I/O serialized and lower priority than playback or live
+  scrubbing; inactive analysis and picking perform no periodic work
+- Preserved the alpha.9 renderer, molecular shading, ball-and-stick proportions,
+  antialiasing, frame-streaming cache, and no-skip playback path
+
+### Performance
+
+- A local RTX 4070 Laptop GPU run sustained 60.00 FPS for 100,000 atoms and
+  99,999 bonds with 2.83 ms paint p95 and 0.39 ms position-upload p95
+- The local one-million-atom camera-stop frame measured 23.02 ms, and GPU
+  picking measured 5.37 ms p95; results depend on hardware and driver
+
 ## [0.1.0-alpha.9] - 2026-08-10
 
 ### Added
@@ -178,7 +214,8 @@ All notable changes to TrajPlayer are documented here. The project follows
 - Windows x64 and Linux x86_64 portable packaging
 - Cross-platform tests, CI, release automation, and dependency license collection
 
-[Unreleased]: https://github.com/luosj1212/TrajPlayer/compare/v0.1.0-alpha.9...HEAD
+[Unreleased]: https://github.com/luosj1212/TrajPlayer/compare/v0.1.0-alpha.10...HEAD
+[0.1.0-alpha.10]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.10
 [0.1.0-alpha.9]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.9
 [0.1.0-alpha.8]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.8
 [0.1.0-alpha.7]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.7

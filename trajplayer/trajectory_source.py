@@ -78,6 +78,14 @@ def paths_are_supported_for_drop(paths: Iterable[Path]) -> bool:
     )
 
 
+def drop_requires_gro(paths: Iterable[Path]) -> bool:
+    selected = _unique_paths(paths)
+    suffixes = {path.suffix.lower() for path in selected}
+    return bool(suffixes & GROMACS_TRAJECTORY_SUFFIXES) and (
+        GROMACS_TOPOLOGY_SUFFIX not in suffixes
+    )
+
+
 def _unique_paths(paths: Iterable[Path]) -> list[Path]:
     result: list[Path] = []
     seen: set[str] = set()

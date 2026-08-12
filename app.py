@@ -5,6 +5,7 @@ import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable
+from uuid import UUID
 
 PROCESS_STARTED_S = time.perf_counter()
 
@@ -32,6 +33,19 @@ from trajplayer.cli_args import CliArgs, parse_cli_args
 from trajplayer.commands import WindowCommands
 from trajplayer.gl_view import MoleculeGLWidget, default_surface_format
 from trajplayer.frame_store import FrameStore
+from trajplayer.exporter import ExportThread
+from trajplayer.interaction.models import AnalysisRequest, AnalysisResult, SelectionSnapshot
+from trajplayer.analysis import AnalysisScheduler
+from trajplayer.interaction.measurements import (
+    Measurement,
+    MeasurementKind,
+    MeasurementManager,
+    MeasurementValue,
+    evaluate_measurement,
+    measurement_kind_for_count,
+)
+from trajplayer.interaction.picking import PickResult
+from trajplayer.interaction.selection_manager import SelectionManager, SelectionOp
 from trajplayer.playback import PlaybackEngine
 from trajplayer.present_scheduler import PresentScheduler, RenderTicket
 from trajplayer.process_memory import ProcessMemorySnapshot, process_memory_snapshot
@@ -43,10 +57,14 @@ from trajplayer.selection import (
 )
 from trajplayer.streaming import FrameStreamer
 from trajplayer.topology import BondSource, BondTopology, empty_topology
+from trajplayer.timeline import TimelineModel
 from trajplayer.ui import MainWindowView
+from trajplayer.ui.recent_files import RecentFiles
+from trajplayer.ui.viewport_overlay import overlay_entry
 from trajplayer.trajectory_source import (
     TrajectorySelectionError,
     TrajectorySource,
+    drop_requires_gro,
     paths_are_supported_for_drop,
     resolve_trajectory_source,
 )
@@ -107,6 +125,14 @@ class TrajPlayerWindow(MainWindowView):
     @current_frame.setter
     def current_frame(self, frame_index: int) -> None:
         self.present_scheduler.set_target_frame(frame_index)
+        timeline_model = getattr(self, "timeline_model", None)
+        if timeline_model is not None:
+            timeline_model.set_current_frame(frame_index)
+            plot = getattr(self, "analysis_plot", None)
+            if plot is not None and plot.result is not None:
+                plot.set_cursor_frame(frame_index)
+                if plot.result.metadata.get("x_kind") == "frame":
+                    timeline_model.set_analysis_cursor(frame_index)
 
     @property
     def displayed_frame(self) -> int:
@@ -125,6 +151,7 @@ class TrajPlayerWindow(MainWindowView):
         self.streamer: FrameStreamer | None = None
         self.open_thread: TrajectoryOpenThread | None = None
         self._pending_open_source: TrajectorySource | None = None
+        self.current_source: TrajectorySource | None = None
         self._retired_open_stores: dict[
             TrajectoryOpenThread, FrameStore | None
         ] = {}
@@ -137,6 +164,7 @@ class TrajPlayerWindow(MainWindowView):
         self.present_scheduler = PresentScheduler()
         self.last_stream_seek_frame = 0
         self.trajectory_generation = 0
+        self.bond_generation = 0
         self.reset_view_on_next_frame = False
         self.internal_slider_change = False
         self.suppress_slider_value: int | None = None
@@ -167,10 +195,37 @@ class TrajPlayerWindow(MainWindowView):
         }
         self._open_started_s: float | None = None
         self._open_first_frame_ms = 0.0
+        self.timeline_model = TimelineModel(self)
+        self.timeline_model.changed.connect(self.on_timeline_model_changed)
+        self._timeline_marker_signature: tuple[str, ...] = ()
+        self._timeline_control_signature: tuple[object, ...] | None = None
+        self.analysis_scheduler = AnalysisScheduler(self)
+        self.analysis_scheduler.started.connect(self.on_analysis_started)
+        self.analysis_scheduler.progress.connect(self.on_analysis_progress)
+        self.analysis_scheduler.resultReady.connect(self.on_analysis_result)
+        self.analysis_scheduler.failed.connect(self.on_analysis_failed)
+        self.analysis_scheduler.cancelled.connect(self.on_analysis_cancelled)
+        self.analysis_scheduler.idle.connect(self.on_analysis_idle)
+        self._analysis_result: AnalysisResult | None = None
+        self._active_analysis_generation = -1
+        self._retired_analysis_stores: set[FrameStore] = set()
+        self.export_thread: ExportThread | None = None
+        self._export_store: FrameStore | None = None
+        self._retired_export_stores: set[FrameStore] = set()
+
+        self.selection_manager = SelectionManager(self)
+        self.selection_manager.selectionChanged.connect(self.on_selection_changed)
+        self.measurement_manager = MeasurementManager(self)
+        self.measurement_manager.measurementsChanged.connect(
+            self.on_measurements_changed
+        )
+        self._measurement_draft: Measurement | None = None
 
         self.gl_view = MoleculeGLWidget()
         self.gl_view.frameSwapped.connect(self.on_frame_swapped)
         self.gl_view.renderTicketPainted.connect(self.on_render_ticket_painted)
+        self.gl_view.atomPicked.connect(self.on_atom_picked)
+        self.gl_view.atomDoubleClicked.connect(self.on_atom_double_clicked)
         self.stream_frame_ready.connect(self.on_stream_frame_ready)
         self.stream_failed.connect(self.on_stream_failed)
 
@@ -179,15 +234,29 @@ class TrajPlayerWindow(MainWindowView):
         self.retired_streamer_timer.timeout.connect(self.reap_retired_streamers)
 
         self.setup_ui(self.gl_view)
+        self.recent_files = RecentFiles(self._settings)
+        self.update_recent_menu()
+        self.on_timeline_model_changed()
         self.commands = WindowCommands(
             self,
             open_file=self.open_file,
             toggle_playback=self.toggle_playback,
             step_previous=self.step_prev,
             step_next=self.step_next,
+            step_back_ten=self.step_back_ten,
+            step_forward_ten=self.step_forward_ten,
+            show_recent_files=self.show_recent_files,
             jump_first=self.jump_first,
             jump_last=self.jump_last,
             reset_camera=self.reset_view,
+            clear_selection=self.clear_selection,
+            focus_selection=self.focus_selection,
+            create_measurement=self.create_measurement_from_selection,
+            add_marker=self.add_timeline_marker,
+            export_frame=self.export_current_frame,
+            export_analysis=self.export_analysis_csv,
+            toggle_analysis_panel=self.toggle_analysis_panel,
+            delete_context_item=self.delete_context_item,
         )
         self.commands.bind_buttons(self)
         self.retranslate_ui()
@@ -229,14 +298,56 @@ class TrajPlayerWindow(MainWindowView):
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
         if paths_are_supported_for_drop(paths):
+            try:
+                source = resolve_trajectory_source(paths)
+            except TrajectorySelectionError:
+                self.drop_feedback_label.setText(
+                    self._t(
+                        "drop_need_gro"
+                        if drop_requires_gro(paths)
+                        else "drop_unsupported"
+                    )
+                )
+            else:
+                self.drop_feedback_label.setText(
+                    self._t("drop_open", name=source.display_name)
+                )
+            self.drop_feedback_label.show()
             event.acceptProposedAction()
         else:
+            self.drop_feedback_label.setText(self._t("drop_unsupported"))
+            self.drop_feedback_label.show()
             event.ignore()
 
+    def dragLeaveEvent(self, event) -> None:  # type: ignore[override]
+        self.drop_feedback_label.hide()
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event) -> None:  # type: ignore[override]
+        self.drop_feedback_label.hide()
         paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
         if paths:
             self.load_trajectory_paths(paths)
+
+    def update_recent_menu(self) -> None:
+        if not hasattr(self, "recent_menu") or not hasattr(self, "recent_files"):
+            return
+        self.recent_menu.clear()
+        sources = self.recent_files.sources()
+        if not sources:
+            action = self.recent_menu.addAction(self._t("no_recent"))
+            action.setEnabled(False)
+            return
+        for source in sources:
+            action = self.recent_menu.addAction(source.display_name)
+            action.setToolTip(source.tooltip)
+            action.triggered.connect(
+                lambda _checked=False, paths=source.paths: self.load_trajectory_paths(paths)
+            )
+
+    def show_recent_files(self) -> None:
+        self.update_recent_menu()
+        self.recent_button.showMenu()
 
     def queue_external_open_path(self, path: Path) -> None:
         candidate = Path(path)
@@ -430,6 +541,10 @@ class TrajPlayerWindow(MainWindowView):
         self.frame_slider.setMaximum(store.frame_count - 1)
         self.internal_slider_change = False
         self.frame_slider.setEnabled(store.frame_count > 1)
+        self.timeline_model.set_frame_count(
+            store.frame_count,
+            final=store.frame_count_is_final,
+        )
         self.progress_bar.hide()
         if bool(store.metadata.get("direct_reader")):
             source_label = self._t("direct_reader")
@@ -442,6 +557,7 @@ class TrajPlayerWindow(MainWindowView):
         self.open_button.setEnabled(True)
         self.set_controls_enabled(store.frame_count > 1)
         self.commands.set_reset_enabled(True)
+        self.commands.set_timeline_enabled(True)
         self.update_frame_label()
 
     def on_open_thread_finished(self, thread: TrajectoryOpenThread) -> None:
@@ -449,6 +565,8 @@ class TrajPlayerWindow(MainWindowView):
         if (
             retired_store is not None
             and retired_store not in self._retired_streamers.values()
+            and retired_store not in self._retired_analysis_stores
+            and retired_store not in self._retired_export_stores
         ):
             retired_store.close()
         if self.open_thread is thread and thread.preview_store is None:
@@ -470,6 +588,19 @@ class TrajPlayerWindow(MainWindowView):
     ) -> None:
         self.present_scheduler.begin_generation(target_frame=0)
         self.store = store
+        self.current_source = source
+        if hasattr(self, "recent_files"):
+            self.recent_files.record(source)
+            self.update_recent_menu()
+        self.timeline_model.reset(
+            store.navigable_frame_count,
+            final=store.frame_count_is_final,
+        )
+        self.selection_manager.begin_trajectory(
+            store.atom_count,
+            self.trajectory_generation,
+        )
+        self.measurement_manager.begin_trajectory(self.trajectory_generation)
 
         def report_stream_error(error: BaseException) -> None:
             self.stream_failed.emit(
@@ -497,7 +628,10 @@ class TrajPlayerWindow(MainWindowView):
         self.set_representation_controls_enabled(True)
         self.gl_view.set_box_enabled(self.box_check.isChecked())
         self.box_check.setEnabled(store.has_cells)
+        self.measurement_pbc_check.setEnabled(store.has_cells)
+        self.measurement_pbc_check.setChecked(store.has_cells)
         self.infer_bonds_check.setEnabled(not bool(store.metadata.get("synthetic")))
+        self.configure_analysis_controls(store)
         self.configure_filter_controls(store.atom_count)
         if self.infer_bonds_check.isChecked():
             self.start_bond_inference(store)
@@ -510,12 +644,17 @@ class TrajPlayerWindow(MainWindowView):
         self.frame_slider.setValue(0)
         self.internal_slider_change = False
         self.frame_slider.setEnabled(store.navigable_frame_count > 1)
+        self.update_timeline_controls()
 
         self.file_label.setText(source.display_name)
         self.file_label.setToolTip(source.tooltip)
         self.update_trajectory_info()
         self.set_controls_enabled(store.navigable_frame_count > 1)
         self.commands.set_reset_enabled(True)
+        self.commands.set_timeline_enabled(True)
+        self.commands.set_export_enabled(frame=True, analysis=False)
+        self.export_frame_button.setEnabled(True)
+        self.export_screenshot_button.setEnabled(True)
         self.update_frame_label()
 
     def update_available_controls(self) -> None:
@@ -528,10 +667,715 @@ class TrajPlayerWindow(MainWindowView):
         enabled = available > 1
         self.frame_slider.setEnabled(enabled)
         self.set_controls_enabled(enabled)
+        self.timeline_model.set_frame_count(
+            available,
+            final=self.store.frame_count_is_final,
+        )
+        self.update_timeline_controls()
+        self.reference_frame_spin.setMaximum(max(1, available))
+        self.analysis_max_lag_spin.setMaximum(max(0, available - 1))
+
+    def on_timeline_model_changed(self) -> None:
+        if not hasattr(self, "frame_slider"):
+            return
+        model = self.timeline_model
+        signature = (
+            model.frame_count,
+            model.frame_count_final,
+            model.range_start,
+            model.range_end,
+            tuple(str(marker.marker_id) for marker in model.markers),
+        )
+        self.frame_slider.update()
+        if signature != self._timeline_control_signature:
+            self.update_timeline_controls()
+
+    def update_timeline_controls(self) -> None:
+        if not hasattr(self, "range_start_spin"):
+            return
+        model = self.timeline_model
+        count = max(1, model.frame_count)
+        for spin in (self.range_start_spin, self.range_end_spin):
+            spin.blockSignals(True)
+            spin.setRange(1, count)
+        self.range_start_spin.setValue(model.range_start + 1)
+        self.range_end_spin.setValue(model.range_end + 1)
+        for spin in (self.range_start_spin, self.range_end_spin):
+            spin.blockSignals(False)
+        enabled = self.store is not None and model.frame_count > 1
+        self.add_marker_button.setEnabled(self.store is not None)
+        self.timeline_range_check.setEnabled(enabled)
+        self.range_start_spin.setEnabled(enabled and self.timeline_range_check.isChecked())
+        self.range_end_spin.setEnabled(enabled and self.timeline_range_check.isChecked())
+
+        signature = tuple(str(marker.marker_id) for marker in model.markers)
+        if signature != self._timeline_marker_signature:
+            selected = str(self.marker_combo.currentData() or "")
+            self.marker_combo.blockSignals(True)
+            self.marker_combo.clear()
+            for marker in model.markers:
+                self.marker_combo.addItem(
+                    f"{marker.label} ({marker.frame_index + 1})",
+                    str(marker.marker_id),
+                )
+            self.marker_combo.blockSignals(False)
+            self.marker_combo.setEnabled(bool(model.markers))
+            self.remove_marker_button.setEnabled(bool(model.markers))
+            self.marker_combo.setVisible(bool(model.markers))
+            self.remove_marker_button.setVisible(bool(model.markers))
+            index = self.marker_combo.findData(selected)
+            self.marker_combo.setCurrentIndex(index if index >= 0 else (0 if model.markers else -1))
+            self._timeline_marker_signature = signature
+        self._timeline_control_signature = (
+            model.frame_count,
+            model.frame_count_final,
+            model.range_start,
+            model.range_end,
+            tuple(str(marker.marker_id) for marker in model.markers),
+        )
+
+    def on_timeline_range_changed(self, _value=None) -> None:
+        if not hasattr(self, "timeline_range_check"):
+            return
+        enabled = self.timeline_range_check.isChecked() and self.store is not None
+        self.range_start_spin.setEnabled(enabled)
+        self.range_end_spin.setEnabled(enabled)
+        self.range_start_label.setVisible(enabled)
+        self.range_end_label.setVisible(enabled)
+        self.range_start_spin.setVisible(enabled)
+        self.range_end_spin.setVisible(enabled)
+        if self.store is None:
+            return
+        if not enabled:
+            self.timeline_model.set_range(0, self.store.navigable_frame_count - 1)
+            return
+        self.timeline_model.set_range(
+            self.range_start_spin.value() - 1,
+            self.range_end_spin.value() - 1,
+        )
+
+    def add_timeline_marker(self, frame_index=None) -> None:
+        if self.store is None:
+            return
+        frame = self.current_frame if frame_index is None or isinstance(frame_index, bool) else int(frame_index)
+        marker = self.timeline_model.add_marker(frame)
+        self.update_timeline_controls()
+        index = self.marker_combo.findData(str(marker.marker_id))
+        if index >= 0:
+            self.marker_combo.setCurrentIndex(index)
+
+    def remove_selected_marker(self) -> None:
+        marker_id = str(self.marker_combo.currentData() or "")
+        if marker_id:
+            self.timeline_model.remove_marker(UUID(marker_id))
+
+    def on_marker_selected(self, index: int) -> None:
+        if index < 0:
+            return
+        marker_id = str(self.marker_combo.itemData(index) or "")
+        for marker in self.timeline_model.markers:
+            if str(marker.marker_id) == marker_id:
+                self.seek_from_timeline(marker.frame_index)
+                return
+
+    def seek_from_timeline(self, frame_index: int) -> None:
+        if self.store is None:
+            return
+        frame = max(0, min(int(frame_index), self.store.navigable_frame_count - 1))
+        self.set_slider_value(frame)
+        self.commit_frame_seek(frame)
 
     def on_box_toggled(self, checked: bool) -> None:
         self.gl_view.set_box_enabled(checked)
         self.displayed_frame = -1
+
+    def on_atom_picked(self, result: PickResult, modifiers) -> None:
+        if self.store is None or int(result.atom_index) >= self.store.atom_count:
+            return
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            operation = SelectionOp.ADD
+        elif modifiers & (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
+        ):
+            operation = SelectionOp.TOGGLE
+        elif modifiers & Qt.KeyboardModifier.AltModifier:
+            operation = SelectionOp.REMOVE
+        else:
+            operation = SelectionOp.REPLACE
+        self.selection_manager.select_atom(result.atom_index, operation)
+
+    def on_atom_double_clicked(self, result: PickResult, _modifiers) -> None:
+        if self.store is None or int(result.atom_index) >= self.store.atom_count:
+            return
+        self.selection_manager.select_atom(result.atom_index, SelectionOp.REPLACE)
+        self.focus_selection()
+
+    def on_selection_changed(self, snapshot: SelectionSnapshot) -> None:
+        self.gl_view.set_selection(snapshot.atom_indices)
+        self.update_selection_ui()
+        self.update_measurement_ui()
+        result = self._analysis_result
+        if (
+            result is not None
+            and result.metadata.get("selection_scope") == "selection"
+            and result.selection_revision != snapshot.revision
+        ):
+            self.analysis_status_label.setText(self._t("analysis_old_selection"))
+
+    def update_selection_ui(self) -> None:
+        if not hasattr(self, "selection_summary_label"):
+            return
+        snapshot = self.selection_manager.snapshot()
+        count = int(snapshot.atom_indices.size)
+        enabled = self.store is not None and count > 0
+        self.clear_selection_button.setEnabled(enabled)
+        self.focus_selection_button.setEnabled(enabled)
+        commands = getattr(self, "commands", None)
+        if commands is not None:
+            commands.set_selection_enabled(enabled)
+            commands.set_measurement_enabled(enabled and count in {2, 3, 4})
+        if not enabled:
+            self.selection_summary_label.setText(self._t("no_selection"))
+            self.selection_summary_label.setToolTip("")
+            return
+        indices = snapshot.atom_indices.astype(np.int64, copy=False)
+        shown = ", ".join(str(int(index) + 1) for index in indices[:8])
+        if count > 8:
+            shown += ", ..."
+        summary = self._t("selected_count", count=count)
+        self.selection_summary_label.setText(f"{summary}\n{self._t('selected_atoms', atoms=shown)}")
+        self.selection_summary_label.setToolTip(
+            ", ".join(str(int(index) + 1) for index in indices[:256])
+        )
+
+    def clear_selection(self) -> None:
+        self.selection_manager.clear()
+
+    def focus_selection(self) -> None:
+        snapshot = self.selection_manager.snapshot()
+        if snapshot.atom_indices.size:
+            self.gl_view.focus_atoms(snapshot.atom_indices)
+
+    def on_measurement_pbc_toggled(self, _checked: bool) -> None:
+        self.update_measurement_ui()
+
+    def create_measurement_from_selection(self) -> None:
+        order = self.selection_manager.selection_order()
+        if order.size not in {2, 3, 4}:
+            return
+        pbc_mode = (
+            "minimum_image"
+            if self.measurement_pbc_check.isChecked()
+            else "raw"
+        )
+        measurement = self.measurement_manager.create(order, pbc_mode=pbc_mode)
+        self._select_measurement_id(str(measurement.measurement_id))
+
+    def remove_selected_measurement(self) -> None:
+        measurement_id = str(self.measurement_combo.currentData() or "")
+        if not measurement_id:
+            return
+        for measurement in self.measurement_manager.measurements:
+            if str(measurement.measurement_id) == measurement_id:
+                self.measurement_manager.remove(measurement.measurement_id)
+                return
+
+    def delete_context_item(self) -> None:
+        if self.measurement_combo.isVisible() and self.measurement_combo.currentIndex() >= 0:
+            self.remove_selected_measurement()
+        elif self.marker_combo.isVisible() and self.marker_combo.currentIndex() >= 0:
+            self.remove_selected_marker()
+
+    def on_measurement_selected(self, _index: int = -1) -> None:
+        enabled = self.measurement_combo.currentIndex() >= 0
+        self.remove_measurement_button.setEnabled(enabled)
+        self.analyze_measurement_button.setEnabled(enabled and self.store is not None)
+
+    def on_measurements_changed(self, measurements) -> None:
+        selected_id = str(self.measurement_combo.currentData() or "")
+        self.measurement_combo.blockSignals(True)
+        self.measurement_combo.clear()
+        for measurement in measurements:
+            atoms = "-".join(str(index + 1) for index in measurement.atom_indices)
+            self.measurement_combo.addItem(
+                f"{self._measurement_kind_name(measurement.kind)} {atoms}",
+                str(measurement.measurement_id),
+            )
+        self.measurement_combo.blockSignals(False)
+        self.measurement_combo.setEnabled(bool(measurements))
+        self.measurement_combo.setVisible(bool(measurements))
+        self.remove_measurement_button.setVisible(bool(measurements))
+        self._select_measurement_id(selected_id)
+        self.on_measurement_selected()
+        self.update_measurement_ui()
+
+    def _select_measurement_id(self, measurement_id: str) -> None:
+        if not measurement_id:
+            if self.measurement_combo.count():
+                self.measurement_combo.setCurrentIndex(0)
+            return
+        index = self.measurement_combo.findData(measurement_id)
+        if index >= 0:
+            self.measurement_combo.setCurrentIndex(index)
+
+    def _measurement_kind_name(self, kind: MeasurementKind) -> str:
+        return self._t(f"{kind.value}_name")
+
+    def _format_measurement_value(self, value: MeasurementValue) -> str:
+        atoms = "-".join(str(index + 1) for index in value.measurement.atom_indices)
+        suffix = "A" if value.unit == "A" else "deg"
+        return (
+            f"{self._measurement_kind_name(value.measurement.kind)} "
+            f"{atoms} = {value.value:.3f} {suffix}"
+        )
+
+    def update_measurement_ui(self) -> None:
+        if not hasattr(self, "measurement_draft_label"):
+            return
+        positions = self.gl_view.current_positions
+        cell = self.gl_view.current_cell
+        order = self.selection_manager.selection_order()
+        draft_value: MeasurementValue | None = None
+        self._measurement_draft = None
+        if (
+            self.store is not None
+            and positions.shape == (self.store.atom_count, 3)
+            and order.size in {2, 3, 4}
+        ):
+            try:
+                draft = Measurement(
+                    kind=measurement_kind_for_count(order.size),
+                    atom_indices=tuple(int(index) for index in order),
+                    pbc_mode=(
+                        "minimum_image"
+                        if self.measurement_pbc_check.isChecked()
+                        else "raw"
+                    ),
+                    pinned=False,
+                )
+                draft_value = evaluate_measurement(draft, positions, cell)
+                self._measurement_draft = draft
+            except (IndexError, ValueError):
+                draft_value = None
+        if draft_value is None:
+            self.measurement_draft_label.setText(self._t("measurement_hint"))
+            self.pin_measurement_button.setEnabled(False)
+        else:
+            self.measurement_draft_label.setText(
+                self._format_measurement_value(draft_value)
+            )
+            self.pin_measurement_button.setEnabled(True)
+
+        entries = []
+        if positions.ndim == 2 and positions.shape[1:] == (3,):
+            for measurement in self.measurement_manager.measurements:
+                try:
+                    value = evaluate_measurement(measurement, positions, cell)
+                except (IndexError, ValueError):
+                    continue
+                entries.append(overlay_entry(value, positions, cell))
+            if draft_value is not None and not any(
+                item.atom_indices == draft_value.measurement.atom_indices
+                and item.pbc_mode == draft_value.measurement.pbc_mode
+                for item in self.measurement_manager.measurements
+            ):
+                entries.append(
+                    overlay_entry(draft_value, positions, cell, draft=True)
+                )
+        self.viewport_overlay.set_entries(tuple(entries))
+
+        selected_id = str(self.measurement_combo.currentData() or "")
+        for index, measurement in enumerate(self.measurement_manager.measurements):
+            try:
+                value = evaluate_measurement(measurement, positions, cell)
+                text = self._format_measurement_value(value)
+            except (IndexError, ValueError):
+                atoms = "-".join(str(atom + 1) for atom in measurement.atom_indices)
+                text = f"{self._measurement_kind_name(measurement.kind)} {atoms}"
+            self.measurement_combo.setItemText(index, text)
+        self._select_measurement_id(selected_id)
+
+    def analyze_selected_measurement(self) -> None:
+        measurement_id = str(self.measurement_combo.currentData() or "")
+        measurement = next(
+            (
+                item
+                for item in self.measurement_manager.measurements
+                if str(item.measurement_id) == measurement_id
+            ),
+            None,
+        )
+        if measurement is None or self.store is None:
+            return
+        indices = np.asarray(sorted(measurement.atom_indices), dtype=np.uint32)
+        snapshot = SelectionSnapshot(
+            atom_indices=indices,
+            primary_atom=int(indices[-1]),
+            revision=self.selection_manager.revision,
+            trajectory_generation=self.trajectory_generation,
+        )
+        request = AnalysisRequest(
+            kind="measurement",
+            source_frames=self._analysis_frame_range(),
+            selection=snapshot,
+            parameters={
+                "measurement": measurement,
+                "timestep": self.timestep_spin.value(),
+                "time_unit": str(self.time_unit_combo.currentData()),
+            },
+        )
+        self._submit_analysis(request)
+
+    def configure_analysis_controls(self, store: FrameStore) -> None:
+        enabled = store.navigable_frame_count > 0
+        self.analysis_kind_combo.setEnabled(enabled)
+        self.analysis_scope_combo.setEnabled(enabled)
+        self.analysis_stride_spin.setEnabled(enabled)
+        self.timestep_spin.setEnabled(enabled)
+        self.time_unit_combo.setEnabled(enabled)
+        self.run_analysis_button.setEnabled(enabled)
+        self.reference_frame_spin.setRange(1, max(1, store.navigable_frame_count))
+        self.reference_frame_spin.setValue(min(self.current_frame + 1, self.reference_frame_spin.maximum()))
+        self.analysis_max_lag_spin.setMaximum(
+            max(0, store.navigable_frame_count - 1)
+        )
+        self.analysis_pbc_check.setEnabled(enabled and store.has_cells)
+        self.analysis_pbc_check.setChecked(store.has_cells)
+        self.on_analysis_kind_changed()
+
+    def on_analysis_kind_changed(self, _index: int = -1) -> None:
+        if not hasattr(self, "analysis_kind_combo"):
+            return
+        kind = str(self.analysis_kind_combo.currentData() or "density")
+        enabled = self.store is not None
+        dimensions = kind in {"msd", "msd_windowed"}
+        windowed_msd = kind == "msd_windowed"
+        profile = kind == "density_profile"
+        fit = kind in {"rmsd", "rmsf"}
+        reference = fit
+        pbc = kind in {"msd", "msd_windowed", "rmsd", "rmsf", "com", "rg"}
+        mass = kind in {"density", "density_profile", "rmsd", "rmsf"}
+        for widget in (self.analysis_dimensions_label, self.analysis_dimensions_combo):
+            widget.setVisible(dimensions)
+            widget.setEnabled(enabled)
+        for widget in (self.analysis_max_lag_label, self.analysis_max_lag_spin):
+            widget.setVisible(windowed_msd)
+            widget.setEnabled(enabled)
+        self.analysis_remove_drift_check.setVisible(dimensions)
+        self.analysis_remove_drift_check.setEnabled(enabled)
+        for widget in (self.analysis_axis_label, self.analysis_axis_combo, self.analysis_bins_label, self.analysis_bins_spin):
+            widget.setVisible(profile)
+            widget.setEnabled(enabled)
+        self.analysis_fit_check.setVisible(fit)
+        self.analysis_fit_check.setEnabled(enabled)
+        self.reference_frame_label.setVisible(reference)
+        self.reference_frame_spin.setVisible(reference)
+        self.reference_frame_spin.setEnabled(enabled)
+        self.analysis_pbc_check.setVisible(pbc)
+        self.analysis_pbc_check.setEnabled(enabled and self.store is not None and self.store.has_cells)
+        self.analysis_pbc_check.setText(
+            self._t(
+                "analysis_pbc"
+                if dimensions
+                else "analysis_pbc_make_whole"
+            )
+        )
+        self.analysis_mass_check.setVisible(mass)
+        self.analysis_mass_check.setEnabled(enabled)
+        self.analysis_mass_check.setChecked(kind in {"density", "density_profile"})
+        self.analysis_mass_check.setText(
+            self._t(
+                "analysis_mass_density"
+                if kind in {"density", "density_profile"}
+                else "analysis_mass"
+            )
+        )
+        self.analysis_warning_label.setVisible(dimensions)
+        self.analysis_warning_label.setText(self._t("msd_warning") if dimensions else "")
+
+    def run_selected_analysis(self) -> None:
+        if self.store is None:
+            return
+        snapshot = self.selection_manager.snapshot()
+        if str(self.analysis_scope_combo.currentData()) == "all":
+            snapshot = SelectionSnapshot(
+                atom_indices=np.empty((0,), dtype=np.uint32),
+                primary_atom=None,
+                revision=snapshot.revision,
+                trajectory_generation=snapshot.trajectory_generation,
+            )
+        elif snapshot.atom_indices.size == 0:
+            self.show_error(self._t("no_selection"))
+            return
+        kind = str(self.analysis_kind_combo.currentData())
+        parameters: dict[str, object] = {
+            "unwrap_pbc": self.analysis_pbc_check.isChecked(),
+            "make_whole": self.analysis_pbc_check.isChecked(),
+            "fit": self.analysis_fit_check.isChecked(),
+            "mass_density": self.analysis_mass_check.isChecked(),
+            "mass_weighted": self.analysis_mass_check.isChecked(),
+            "dimensions": str(self.analysis_dimensions_combo.currentData()),
+            "max_lag": self.analysis_max_lag_spin.value() or None,
+            "remove_com_drift": self.analysis_remove_drift_check.isChecked(),
+            "axis": str(self.analysis_axis_combo.currentData()),
+            "bins": self.analysis_bins_spin.value(),
+            "reference_frame": self.reference_frame_spin.value() - 1,
+            "timestep": self.timestep_spin.value(),
+            "time_unit": str(self.time_unit_combo.currentData()),
+        }
+        request = AnalysisRequest(
+            kind=kind,
+            source_frames=self._analysis_frame_range(),
+            selection=snapshot,
+            parameters=parameters,
+        )
+        self._submit_analysis(request)
+
+    def _analysis_frame_range(self) -> tuple[int, int, int]:
+        if self.store is None:
+            return (0, 1, 1)
+        if self.timeline_range_check.isChecked():
+            start = self.timeline_model.range_start
+            stop = self.timeline_model.range_end + 1
+        else:
+            start = 0
+            stop = self.store.navigable_frame_count
+        return start, max(start + 1, stop), self.analysis_stride_spin.value()
+
+    def _submit_analysis(self, request: AnalysisRequest) -> None:
+        if self.store is None:
+            return
+        try:
+            self.analysis_scheduler.submit(self.store, request, self.store.atom_numbers)
+        except RuntimeError as exc:
+            self.status_bar.showMessage(self._t("analysis_busy"))
+
+    def cancel_analysis(self) -> None:
+        self.analysis_scheduler.cancel()
+        self.analysis_status_label.setText(self._t("cancel_analysis"))
+
+    def on_analysis_started(self, request: AnalysisRequest) -> None:
+        self._active_analysis_generation = request.selection.trajectory_generation
+        self.analysis_panel.show()
+        self.analysis_result_label.setText(self._t(f"{request.kind}_name") if request.kind != "measurement" else self._t("measurement"))
+        self.analysis_status_label.setText(self._t("analysis_running"))
+        self.analysis_progress.show()
+        self.analysis_progress.setRange(0, 0)
+        self.run_analysis_button.setEnabled(False)
+        self.cancel_analysis_button.setEnabled(True)
+        self.export_analysis_button.setEnabled(False)
+        self.export_analysis_plot_button.setEnabled(False)
+
+    def on_analysis_progress(self, done: int, total: int) -> None:
+        if self._active_analysis_generation != self.trajectory_generation:
+            return
+        self.analysis_progress.setRange(0, max(1, int(total)))
+        self.analysis_progress.setValue(int(done))
+        self.analysis_status_label.setText(f"{int(done)} / {int(total)}")
+
+    def on_analysis_result(self, result: AnalysisResult) -> None:
+        if result.trajectory_generation != self.trajectory_generation:
+            return
+        self._analysis_result = result
+        self.analysis_plot.set_result(result)
+        self.analysis_plot.set_cursor_frame(self.current_frame)
+        self.timeline_model.set_analysis_cursor(self.current_frame if result.metadata.get("x_kind") == "frame" else None)
+        self.analysis_panel.show()
+        stale = (
+            result.metadata.get("selection_scope") == "selection"
+            and result.selection_revision != self.selection_manager.revision
+        )
+        self.analysis_status_label.setText(
+            self._t("analysis_old_selection")
+            if stale
+            else self._t("analysis_points", count=result.x.size)
+        )
+        self.analysis_progress.setRange(0, 1)
+        self.analysis_progress.setValue(1)
+        self.analysis_progress.hide()
+        self.export_analysis_button.setEnabled(True)
+        self.export_analysis_plot_button.setEnabled(True)
+        self.commands.set_export_enabled(frame=True, analysis=True)
+
+    def on_analysis_failed(self, message: str) -> None:
+        if self._active_analysis_generation != self.trajectory_generation:
+            return
+        if any(
+            marker in message
+            for marker in (
+                "requires cell",
+                "requires a cell",
+                "requires periodic cell",
+                "cell information",
+                "cell is singular",
+            )
+        ):
+            message = self._t("analysis_no_cell")
+        elif "atomic mass" in message:
+            message = self._t("analysis_no_mass")
+        elif "temporary storage" in message:
+            message = self._t("analysis_temp_storage")
+        self.analysis_panel.show()
+        self.analysis_status_label.setText(message)
+        self.status_bar.showMessage(message)
+        self.analysis_progress.setRange(0, 1)
+        self.analysis_progress.setValue(0)
+        self.analysis_progress.hide()
+
+    def on_analysis_cancelled(self) -> None:
+        if self._active_analysis_generation != self.trajectory_generation:
+            return
+        self.analysis_status_label.setText(self._t("cancel_analysis"))
+        self.analysis_progress.setRange(0, 1)
+        self.analysis_progress.setValue(0)
+        self.analysis_progress.hide()
+
+    def on_analysis_idle(self, store: FrameStore) -> None:
+        self._active_analysis_generation = -1
+        self.cancel_analysis_button.setEnabled(False)
+        self.run_analysis_button.setEnabled(self.store is not None)
+        if store in self._retired_analysis_stores:
+            self._retired_analysis_stores.discard(store)
+            if (
+                store not in self._retired_streamers.values()
+                and store not in self._retired_open_stores.values()
+                and store not in self._retired_export_stores
+                and store is not self.store
+            ):
+                store.close()
+
+    def seek_from_analysis(self, frame_index: int) -> None:
+        self.timeline_model.set_analysis_cursor(frame_index)
+        self.analysis_plot.set_cursor_frame(frame_index)
+        self.seek_from_timeline(frame_index)
+
+    def export_analysis_csv(self) -> None:
+        result = self._analysis_result
+        if result is None:
+            return
+        default = self._default_export_directory() / f"{result.kind}.csv"
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            self._t("export_csv"),
+            str(default),
+            "CSV (*.csv);;All files (*.*)",
+        )
+        if file_name:
+            self._start_export("analysis", Path(file_name), result)
+
+    def export_analysis_plot_png(self) -> None:
+        result = self._analysis_result
+        if result is None:
+            return
+        default = self._default_export_directory() / f"{result.kind}.png"
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            self._t("export_plot"),
+            str(default),
+            "PNG image (*.png);;All files (*.*)",
+        )
+        if file_name:
+            image = self.analysis_plot.grab().toImage().copy()
+            self._start_export("image", Path(file_name), image)
+
+    def export_current_frame(self) -> None:
+        if self.store is None or self.streamer is None or self.displayed_frame < 0:
+            return
+        stem = self.current_source.trajectory_path.stem if self.current_source is not None else "frame"
+        default = self._default_export_directory() / f"{stem}-frame-{self.displayed_frame + 1}.extxyz"
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            self._t("export_frame"),
+            str(default),
+            "Extended XYZ (*.extxyz);;XYZ (*.xyz);;All files (*.*)",
+        )
+        if not file_name:
+            return
+        lease = self.streamer.acquire_frame(self.displayed_frame)
+        if lease is None:
+            self.status_bar.showMessage(self._t("export_frame"))
+            return
+        payload = (self.store.atom_numbers, lease.positions, lease.cell)
+        if not self._start_export(
+            "frame",
+            Path(file_name),
+            payload,
+            release_callback=lease.release,
+            store=self.store,
+        ):
+            lease.release()
+
+    def export_viewport_screenshot(self) -> None:
+        if self.store is None:
+            return
+        stem = self.current_source.trajectory_path.stem if self.current_source is not None else "viewport"
+        default = self._default_export_directory() / f"{stem}-frame-{self.current_frame + 1}.png"
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            self._t("export_screenshot"),
+            str(default),
+            "PNG image (*.png);;All files (*.*)",
+        )
+        if file_name:
+            image = self.gl_view.grabFramebuffer().copy()
+            self._start_export("image", Path(file_name), image)
+
+    def _default_export_directory(self) -> Path:
+        if self.current_source is not None:
+            return self.current_source.trajectory_path.parent
+        return Path.home()
+
+    def _start_export(
+        self,
+        kind: str,
+        path: Path,
+        payload,
+        *,
+        release_callback=None,
+        store: FrameStore | None = None,
+    ) -> bool:
+        if self.export_thread is not None:
+            self.status_bar.showMessage(self._t("export_busy"))
+            return False
+        thread = ExportThread(
+            kind=kind,
+            path=path,
+            payload=payload,
+            release_callback=release_callback,
+            parent=self,
+        )
+        thread.succeeded.connect(
+            lambda output: self.status_bar.showMessage(
+                self._t("exported", path=output)
+            )
+        )
+        thread.failed.connect(self.on_export_failed)
+        thread.finished.connect(
+            lambda worker=thread: self.on_export_finished(worker)
+        )
+        self.export_thread = thread
+        self._export_store = store
+        thread.start()
+        return True
+
+    def on_export_failed(self, message: str) -> None:
+        self.status_bar.showMessage(message)
+
+    def on_export_finished(self, thread: ExportThread) -> None:
+        store = self._export_store if self.export_thread is thread else None
+        if self.export_thread is thread:
+            self.export_thread = None
+            self._export_store = None
+        if store in self._retired_export_stores:
+            self._retired_export_stores.discard(store)
+            if (
+                store not in self._retired_streamers.values()
+                and store not in self._retired_open_stores.values()
+                and store not in self._retired_analysis_stores
+                and store is not self.store
+            ):
+                store.close()
+        thread.deleteLater()
 
     def on_infer_bonds_toggled(self, checked: bool) -> None:
         if self.store is None or self.store.metadata.get("synthetic"):
@@ -541,10 +1385,11 @@ class TrajPlayerWindow(MainWindowView):
             return
 
         self.stop_bond_inference(wait_ms=0)
-        self.trajectory_generation += 1
+        self.bond_generation += 1
         self.bond_topology = empty_topology()
         self.component_ids = self.bond_topology.component_ids
         self.component_sizes = self.bond_topology.component_sizes
+        self.selection_manager.set_component_ids(None)
         self.gl_view.set_bonds(self.bond_topology.bonds)
         self.filter_mode_buttons["chain"].setEnabled(False)
         if self.filter_mode == "chain":
@@ -813,7 +1658,7 @@ class TrajPlayerWindow(MainWindowView):
 
     def start_bond_inference(self, store: FrameStore) -> None:
         self.stop_bond_inference(wait_ms=0)
-        self.trajectory_generation += 1
+        self.bond_generation += 1
         self.gl_view.set_bonds(np.empty((0, 2), dtype=np.int32))
         if store.metadata.get("synthetic"):
             self.bond_topology = empty_topology(BondSource.GENERATED)
@@ -856,7 +1701,7 @@ class TrajPlayerWindow(MainWindowView):
         )
         try:
             thread = BondInferenceThread(
-                self.trajectory_generation,
+                self.bond_generation,
                 lease.positions,
                 atom_numbers,
                 lease.cell,
@@ -890,11 +1735,12 @@ class TrajPlayerWindow(MainWindowView):
         topology: BondTopology,
         elapsed_ms: float,
     ) -> None:
-        if generation != self.trajectory_generation or self.store is None:
+        if generation != self.bond_generation or self.store is None:
             return
         self.bond_topology = topology
         self.component_ids = topology.component_ids
         self.component_sizes = topology.component_sizes
+        self.selection_manager.set_component_ids(topology.component_ids)
         self.filter_mode_buttons["chain"].setEnabled(
             topology.chain_selection_available
         )
@@ -910,7 +1756,7 @@ class TrajPlayerWindow(MainWindowView):
         )
 
     def on_bonds_failed(self, generation: int, message: str) -> None:
-        if generation != self.trajectory_generation:
+        if generation != self.bond_generation:
             return
         self.bond_topology = empty_topology(BondSource.INFERENCE_FAILED)
         self.update_trajectory_info()
@@ -1166,6 +2012,17 @@ class TrajPlayerWindow(MainWindowView):
         self.cache_build_in_progress = False
         self.stop_bond_inference(wait_ms=0)
         self.trajectory_generation += 1
+        self.bond_generation += 1
+        self.selection_manager.begin_trajectory(0, self.trajectory_generation)
+        self.measurement_manager.begin_trajectory(self.trajectory_generation)
+        self.timeline_model.reset(0)
+        active_analysis_store = self.analysis_scheduler.active_store
+        self.analysis_scheduler.cancel()
+        active_export_store = (
+            self._export_store
+            if self.export_thread is not None and self.export_thread.isRunning()
+            else None
+        )
         streamer = self.streamer
         store = self.store
         if streamer is not None:
@@ -1174,14 +2031,34 @@ class TrajPlayerWindow(MainWindowView):
                 self.retired_streamer_timer.start()
             self.streamer = None
         if self.store is not None:
+            if self.store is active_analysis_store:
+                self._retired_analysis_stores.add(self.store)
+            if self.store is active_export_store:
+                self._retired_export_stores.add(self.store)
             if (
                 self.store is not deferred_store
                 and self.store not in self._retired_streamers.values()
+                and self.store not in self._retired_analysis_stores
+                and self.store not in self._retired_export_stores
             ):
                 self.store.close()
             self.store = None
         self.gl_view.set_cell(None)
         self.box_check.setEnabled(False)
+        self.measurement_pbc_check.setEnabled(False)
+        self.analysis_kind_combo.setEnabled(False)
+        self.analysis_scope_combo.setEnabled(False)
+        self.analysis_stride_spin.setEnabled(False)
+        self.timestep_spin.setEnabled(False)
+        self.time_unit_combo.setEnabled(False)
+        self.run_analysis_button.setEnabled(False)
+        self.cancel_analysis_button.setEnabled(False)
+        self._analysis_result = None
+        self.current_source = None
+        self.analysis_plot.set_result(None)
+        self.export_analysis_button.setEnabled(False)
+        self.export_analysis_plot_button.setEnabled(False)
+        self.analysis_panel.hide()
         self.infer_bonds_check.setEnabled(False)
         self.set_representation_controls_enabled(False)
         self.component_ids = np.empty((0,), dtype=np.int32)
@@ -1215,6 +2092,11 @@ class TrajPlayerWindow(MainWindowView):
         self.frame_slider.setValue(0)
         self.set_controls_enabled(False)
         self.commands.set_reset_enabled(False)
+        self.commands.set_timeline_enabled(False)
+        self.commands.set_export_enabled(frame=False, analysis=False)
+        self.export_frame_button.setEnabled(False)
+        self.export_screenshot_button.setEnabled(False)
+        self.update_timeline_controls()
 
     def reap_retired_streamers(self) -> None:
         for streamer, store in tuple(self._retired_streamers.items()):
@@ -1223,7 +2105,11 @@ class TrajPlayerWindow(MainWindowView):
             streamer.stop(timeout_s=0.0)
             self._retired_streamers.pop(streamer, None)
             if store not in self._retired_open_stores.values():
-                store.close()
+                if (
+                    store not in self._retired_analysis_stores
+                    and store not in self._retired_export_stores
+                ):
+                    store.close()
         if not self._retired_streamers:
             self.retired_streamer_timer.stop()
 
@@ -1333,6 +2219,7 @@ class TrajPlayerWindow(MainWindowView):
             )
             self._open_started_s = None
         self.update_frame_label()
+        self.update_measurement_ui()
         if self.current_frame != self.displayed_frame:
             self.render_timer.start(0)
             return
@@ -1391,12 +2278,21 @@ class TrajPlayerWindow(MainWindowView):
         available_frames = self.store.navigable_frame_count
         if available_frames <= 1:
             return
+        range_start, range_end = self._active_playback_range(available_frames)
+        if not range_start <= self.current_frame <= range_end:
+            self.current_frame = range_start
+            self.displayed_frame = -1
+            self.set_slider_value(range_start)
+            self.request_stream_frame(range_start)
         self.playback = PlaybackEngine(
             total_frames=available_frames,
             fps=float(self.playback_speed_slider.value()),
             loop=self.loop_check.isChecked(),
+            range_start=range_start,
+            range_end=range_end,
         )
         self.playback.start(frame_index=self.current_frame, now_s=time.perf_counter())
+        self.analysis_scheduler.set_playback_active(True)
         self.streamer.set_playback_fps(float(self.playback_speed_slider.value()))
         self.set_play_button_state(True)
         self.schedule_next_render_tick()
@@ -1404,6 +2300,7 @@ class TrajPlayerWindow(MainWindowView):
     def stop_playback(self) -> None:
         if self.playback is not None:
             self.playback.stop()
+        self.analysis_scheduler.set_playback_active(False)
         self.playback = None
         if self.streamer is not None:
             self.streamer.set_playback_fps(0.0)
@@ -1439,10 +2336,25 @@ class TrajPlayerWindow(MainWindowView):
             total_frames=self.store.navigable_frame_count,
             fps=float(value),
             loop=self.loop_check.isChecked(),
+            range_start=self._active_playback_range(
+                self.store.navigable_frame_count
+            )[0],
+            range_end=self._active_playback_range(
+                self.store.navigable_frame_count
+            )[1],
         )
         self.playback.start(frame_index=self.current_frame, now_s=time.perf_counter())
         self.streamer.set_playback_fps(float(value))
         self.schedule_next_render_tick()
+
+    def _active_playback_range(self, frame_count: int) -> tuple[int, int]:
+        last = max(0, int(frame_count) - 1)
+        if not self.timeline_range_check.isChecked():
+            return 0, last
+        return (
+            max(0, min(self.timeline_model.range_start, last)),
+            max(0, min(self.timeline_model.range_end, last)),
+        )
 
     def set_play_button_state(self, playing: bool) -> None:
         commands = getattr(self, "commands", None)
@@ -1467,8 +2379,10 @@ class TrajPlayerWindow(MainWindowView):
         if self.store is None:
             return
         self.stop_playback()
+        self.analysis_scheduler.set_playback_active(True)
         frame_index = int(self.frame_slider.sliderPosition())
         self.slider_scrub.begin(frame_index)
+        self.timeline_model.set_preview_frame(frame_index)
         self.current_frame = frame_index
         self.update_frame_label()
         self.scrub_preview_timer.start()
@@ -1478,6 +2392,7 @@ class TrajPlayerWindow(MainWindowView):
         if self.store is None:
             return
         frame_index = self.slider_scrub.move(int(value))
+        self.timeline_model.set_preview_frame(frame_index)
         self.current_frame = frame_index
         self.update_frame_label()
         self.submit_scrub_preview(time.perf_counter())
@@ -1487,8 +2402,10 @@ class TrajPlayerWindow(MainWindowView):
             return
         self.scrub_preview_timer.stop()
         frame_index = self.slider_scrub.release(int(self.frame_slider.sliderPosition()))
+        self.timeline_model.set_preview_frame(None)
         self.suppress_slider_value = frame_index
         self.commit_frame_seek(frame_index)
+        self.analysis_scheduler.set_playback_active(False)
 
     def on_scrub_preview_tick(self) -> None:
         self.submit_scrub_preview(time.perf_counter())
@@ -1542,6 +2459,22 @@ class TrajPlayerWindow(MainWindowView):
         self.set_slider_value(self.current_frame)
         self.request_stream_frame(self.current_frame, direction=1)
 
+    def step_back_ten(self) -> None:
+        self._step_frames(-10)
+
+    def step_forward_ten(self) -> None:
+        self._step_frames(10)
+
+    def _step_frames(self, delta: int) -> None:
+        if self.store is None:
+            return
+        self.stop_playback()
+        last_available = max(0, self.store.navigable_frame_count - 1)
+        self.current_frame = max(0, min(last_available, self.current_frame + int(delta)))
+        self.displayed_frame = -1
+        self.set_slider_value(self.current_frame)
+        self.request_stream_frame(self.current_frame, direction=-1 if delta < 0 else 1)
+
     def jump_first(self) -> None:
         if self.store is None:
             return
@@ -1582,10 +2515,20 @@ class TrajPlayerWindow(MainWindowView):
         self.status_bar.showMessage(self._t("error"))
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        shutdown_deadline = time.monotonic() + 5.0
+        export_thread = self.export_thread
+        if export_thread is not None and export_thread.isRunning():
+            export_thread.requestInterruption()
+            export_thread.wait(
+                max(0, int((shutdown_deadline - time.monotonic()) * 1000.0))
+            )
         self._pending_open_source = None
         self.close_current_trajectory()
         self.retired_streamer_timer.stop()
-        shutdown_deadline = time.monotonic() + 5.0
+        if not self.analysis_scheduler.shutdown(
+            max(0, int((shutdown_deadline - time.monotonic()) * 1000.0))
+        ):
+            print("[shutdown] analysis worker did not stop before deadline", flush=True)
         retired = tuple(self._retired_open_stores)
         for thread in retired:
             thread.cancel()
@@ -1597,8 +2540,11 @@ class TrajPlayerWindow(MainWindowView):
             remaining_s = max(0.0, shutdown_deadline - time.monotonic())
             if not streamer.stop(timeout_s=remaining_s):
                 print("[shutdown] frame streamer did not stop before deadline", flush=True)
-        for store in set(self._retired_open_stores.values()) | set(
-            self._retired_streamers.values()
+        for store in (
+            set(self._retired_open_stores.values())
+            | set(self._retired_streamers.values())
+            | set(self._retired_analysis_stores)
+            | set(self._retired_export_stores)
         ):
             if store is not None and not any(
                 worker.isRunning()
@@ -1608,6 +2554,13 @@ class TrajPlayerWindow(MainWindowView):
                 worker.is_alive
                 for worker, worker_store in self._retired_streamers.items()
                 if worker_store is store
+            ) and not (
+                self.analysis_scheduler.active_store is store
+                and self.analysis_scheduler.busy
+            ) and not (
+                self._export_store is store
+                and self.export_thread is not None
+                and self.export_thread.isRunning()
             ):
                 store.close()
         self.stop_bond_inference(wait_ms=0)
@@ -1633,13 +2586,13 @@ def main() -> None:
 
         if not NATIVE_FULL_AVAILABLE:
             print(
-                "[native-smoke] trajplayer._trajcore or an alpha.9 hot-path entry "
+                "[native-smoke] trajplayer._trajcore or a required hot-path entry "
                 f"is unavailable: {NATIVE_IMPORT_ERROR!r}",
                 flush=True,
             )
             raise SystemExit(2)
         print(
-            "[native-smoke] all trajplayer._trajcore alpha.9 hot paths are available",
+            "[native-smoke] all required trajplayer._trajcore hot paths are available",
             flush=True,
         )
         return

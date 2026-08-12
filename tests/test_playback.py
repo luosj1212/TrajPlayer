@@ -52,6 +52,19 @@ class PlaybackEngineTests(unittest.TestCase):
 
         self.assertAlmostEqual(engine.next_frame_delay_s(10.017), (2.0 / 60.0) - 0.017, places=6)
 
+    def test_playback_range_loops_without_skipping(self) -> None:
+        engine = PlaybackEngine(
+            total_frames=20,
+            fps=60.0,
+            loop=True,
+            range_start=4,
+            range_end=7,
+        )
+        engine.start(frame_index=7, now_s=1.0)
+        decision = engine.schedule(1.1)
+        self.assertEqual(decision.frame_index, 4)
+        self.assertEqual(decision.dropped_frames, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

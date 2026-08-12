@@ -57,6 +57,9 @@ version = { attr = "trajplayer.__version__" }
 [tool.setuptools.packages.find]
 include = ["trajplayer*"]
 
+[tool.setuptools.package-data]
+trajplayer = ["i18n/*.qm"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

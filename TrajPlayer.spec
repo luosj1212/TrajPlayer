@@ -12,6 +12,10 @@ from trajplayer import __display_version__
 
 
 extra_binaries = collect_dynamic_libs('chemfiles')
+translation_datas = [
+    (str(path), 'trajplayer/i18n')
+    for path in (project_root / 'trajplayer' / 'i18n').glob('*.qm')
+]
 
 QT_PLUGIN_ALLOWLIST = {
     'win32': {
@@ -99,7 +103,7 @@ a = Analysis(
     [str(project_root / 'app.py')],
     pathex=[str(project_root)],
     binaries=extra_binaries,
-    datas=[],
+    datas=translation_datas,
     hiddenimports=[
         'numpy._core._multiarray_umath',
         'numpy._core._multiarray_tests',

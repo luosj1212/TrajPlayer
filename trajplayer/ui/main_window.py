@@ -1,21 +1,27 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QLocale, QSettings, QSize, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QLocale, QSettings, QSize, Qt, QTranslator
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QPushButton,
     QProgressBar,
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QSplitter,
+    QStackedLayout,
     QStatusBar,
     QStyle,
     QToolButton,
@@ -23,17 +29,36 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .theme import APP_STYLESHEET
+from .theme import APP_STYLESHEET, build_stylesheet, resolve_theme
+from .analysis_plot import AnalysisPlotWidget
+from .viewport_overlay import ViewportOverlay
+from trajplayer.timeline import TimelineWidget
+from trajplayer.i18n import translation_file
 
 
 UI_TEXT = {
     "window_title": {"en": "TrajPlayer GPU", "zh": "TrajPlayer GPU"},
     "open": {"en": "Open", "zh": "打开"},
     "open_tooltip": {"en": "Open trajectory (Ctrl+O)", "zh": "打开轨迹 (Ctrl+O)"},
+    "recent": {"en": "Recent", "zh": "最近"},
+    "recent_tooltip": {"en": "Open a recent trajectory", "zh": "打开最近使用的轨迹"},
+    "recent_shortcut_tooltip": {"en": "Open recent files (Ctrl+Shift+O)", "zh": "打开最近文件 (Ctrl+Shift+O)"},
+    "no_recent": {"en": "No recent trajectories", "zh": "暂无最近轨迹"},
+    "drop_open": {"en": "Release to open {name}", "zh": "松开以打开 {name}"},
+    "drop_need_gro": {"en": "This trajectory needs a GRO topology", "zh": "此轨迹需要 GRO 拓扑文件"},
+    "drop_unsupported": {"en": "This file type is not supported", "zh": "不支持此文件类型"},
     "previous": {"en": "Previous frame", "zh": "上一帧"},
     "previous_tooltip": {"en": "Previous frame (Left)", "zh": "上一帧 (左方向键)"},
     "next": {"en": "Next frame", "zh": "下一帧"},
     "next_tooltip": {"en": "Next frame (Right)", "zh": "下一帧 (右方向键)"},
+    "back_ten": {"en": "Back 10 frames", "zh": "后退 10 帧"},
+    "back_ten_tooltip": {"en": "Back 10 frames (Shift+Left)", "zh": "后退 10 帧 (Shift+左方向键)"},
+    "forward_ten": {"en": "Forward 10 frames", "zh": "前进 10 帧"},
+    "forward_ten_tooltip": {"en": "Forward 10 frames (Shift+Right)", "zh": "前进 10 帧 (Shift+右方向键)"},
+    "toggle_analysis": {"en": "Toggle analysis", "zh": "切换分析面板"},
+    "toggle_analysis_tooltip": {"en": "Show or hide analysis (Ctrl+L)", "zh": "显示或隐藏分析面板 (Ctrl+L)"},
+    "delete_current": {"en": "Delete current item", "zh": "删除当前项目"},
+    "delete_current_tooltip": {"en": "Delete current measurement or marker (Delete)", "zh": "删除当前测量或标记 (Delete)"},
     "play": {"en": "Play", "zh": "播放"},
     "play_tooltip": {"en": "Play (Space)", "zh": "播放 (空格)"},
     "play_accessible": {"en": "Play trajectory", "zh": "播放轨迹"},
@@ -50,11 +75,111 @@ UI_TEXT = {
         "zh": "文件不含拓扑时，根据第 1 帧推断静态化学键",
     },
     "display": {"en": "Display", "zh": "显示"},
+    "visibility": {"en": "Visibility", "zh": "可见范围"},
     "selection": {"en": "Selection", "zh": "选择"},
+    "no_selection": {"en": "Click an atom to select it", "zh": "点击原子进行选择"},
+    "selected_count": {"en": "{count} atoms selected", "zh": "已选择 {count} 个原子"},
+    "selected_atoms": {"en": "Atoms {atoms}", "zh": "原子 {atoms}"},
+    "clear_selection": {"en": "Clear", "zh": "清除"},
+    "clear_selection_tooltip": {"en": "Clear selection (Esc)", "zh": "清除选择 (Esc)"},
+    "focus_selection": {"en": "Focus", "zh": "聚焦"},
+    "focus_selection_tooltip": {"en": "Focus selected atoms (F)", "zh": "聚焦已选原子 (F)"},
+    "measurement": {"en": "Measurement", "zh": "测量"},
+    "measurement_hint": {
+        "en": "Select 2, 3, or 4 atoms in order",
+        "zh": "依次选择 2、3 或 4 个原子",
+    },
+    "measurement_invalid": {
+        "en": "Select exactly 2, 3, or 4 distinct atoms",
+        "zh": "请选择恰好 2、3 或 4 个不同原子",
+    },
+    "measurement_pbc": {"en": "Periodic minimum image", "zh": "周期最小镜像"},
+    "pin_measurement": {"en": "Pin", "zh": "固定"},
+    "pin_measurement_tooltip": {
+        "en": "Pin the current distance, angle, or dihedral (M)",
+        "zh": "固定当前距离、角度或二面角 (M)",
+    },
+    "remove_measurement": {"en": "Remove", "zh": "删除"},
+    "analyze_measurement": {"en": "Over time", "zh": "随时间分析"},
+    "distance_name": {"en": "Distance", "zh": "距离"},
+    "angle_name": {"en": "Angle", "zh": "角度"},
+    "dihedral_name": {"en": "Dihedral", "zh": "二面角"},
+    "timeline": {"en": "Timeline", "zh": "时间轴"},
+    "add_marker": {"en": "Add marker", "zh": "添加标记"},
+    "add_marker_tooltip": {
+        "en": "Mark the current frame (Ctrl+M); double-click the timeline to mark",
+        "zh": "标记当前帧 (Ctrl+M)；双击时间轴也可添加",
+    },
+    "remove_marker": {"en": "Remove", "zh": "删除"},
+    "playback_range": {"en": "Playback range", "zh": "播放区间"},
+    "range_start": {"en": "Start", "zh": "起点"},
+    "range_end": {"en": "End", "zh": "终点"},
+    "analysis": {"en": "Analysis", "zh": "分析"},
+    "analysis_scope": {"en": "Atoms", "zh": "原子范围"},
+    "scope_all": {"en": "All atoms", "zh": "全部原子"},
+    "scope_selection": {"en": "Current selection", "zh": "当前选择"},
+    "analysis_stride": {"en": "Stride", "zh": "步长"},
+    "timestep": {"en": "Timestep", "zh": "帧间隔"},
+    "timestep_unknown": {"en": "Unknown", "zh": "未知"},
+    "analysis_pbc": {"en": "PBC / no-jump", "zh": "周期边界 / 连续坐标"},
+    "analysis_pbc_make_whole": {"en": "PBC / make whole", "zh": "周期边界 / 保持整体"},
+    "analysis_fit": {"en": "Align / fit", "zh": "对齐拟合"},
+    "analysis_mass": {"en": "Mass weighted", "zh": "质量加权"},
+    "analysis_mass_density": {"en": "Mass density", "zh": "质量密度"},
+    "analysis_dimensions": {"en": "Dimensions", "zh": "方向"},
+    "analysis_max_lag": {"en": "Max lag", "zh": "最大延迟"},
+    "analysis_all_lags": {"en": "All", "zh": "全部"},
+    "analysis_remove_drift": {"en": "Remove selection COM drift", "zh": "去除所选原子的质心漂移"},
+    "analysis_axis": {"en": "Profile axis", "zh": "剖面方向"},
+    "analysis_bins": {"en": "Bins", "zh": "分箱数"},
+    "reference_frame": {"en": "Reference", "zh": "参考帧"},
+    "run_analysis": {"en": "Run", "zh": "运行"},
+    "cancel_analysis": {"en": "Cancel", "zh": "取消"},
+    "export_csv": {"en": "Export CSV", "zh": "导出 CSV"},
+    "export_plot": {"en": "Save plot", "zh": "保存图表"},
+    "export_plot_tooltip": {"en": "Save the analysis plot as PNG", "zh": "将分析图表保存为 PNG"},
+    "reset_plot": {"en": "Reset plot zoom", "zh": "重置图表缩放"},
+    "log_x": {"en": "Log X", "zh": "X 对数"},
+    "log_y": {"en": "Log Y", "zh": "Y 对数"},
+    "export_frame": {"en": "Export frame", "zh": "导出当前帧"},
+    "export_frame_tooltip": {"en": "Export current coordinates (Ctrl+E)", "zh": "导出当前坐标 (Ctrl+E)"},
+    "export_screenshot": {"en": "Save screenshot", "zh": "保存截图"},
+    "export_screenshot_tooltip": {"en": "Save the current viewport as PNG", "zh": "将当前视口保存为 PNG"},
+    "close_analysis": {"en": "Close analysis", "zh": "关闭分析"},
+    "analysis_idle": {"en": "Choose an analysis", "zh": "选择一项分析"},
+    "analysis_no_result": {"en": "No analysis result", "zh": "暂无分析结果"},
+    "density_name": {"en": "Density over time", "zh": "密度随时间"},
+    "density_profile_name": {"en": "Density profile over time", "zh": "密度剖面随时间"},
+    "msd_name": {"en": "MSD from origin", "zh": "相对起点 MSD"},
+    "msd_windowed_name": {"en": "Time-averaged MSD", "zh": "时间平均 MSD"},
+    "rmsd_name": {"en": "RMSD", "zh": "均方根偏差 RMSD"},
+    "rmsf_name": {"en": "RMSF", "zh": "均方根涨落 RMSF"},
+    "com_name": {"en": "Center of mass", "zh": "质心 COM"},
+    "rg_name": {"en": "Radius of gyration", "zh": "回转半径 Rg"},
+    "msd_warning": {
+        "en": "Periodic trajectories require continuous no-jump coordinates for a physically meaningful MSD.",
+        "zh": "周期轨迹必须使用连续（no-jump）坐标，MSD 才具有正确物理意义。",
+    },
+    "analysis_old_selection": {"en": "Result based on old selection", "zh": "此结果基于旧选择"},
+    "analysis_points": {"en": "{count} points", "zh": "{count} 个数据点"},
+    "analysis_running": {"en": "Analysis is running in the background", "zh": "正在后台分析"},
+    "analysis_busy": {"en": "Another analysis is already running", "zh": "已有一项分析正在运行"},
+    "analysis_no_cell": {"en": "This analysis requires periodic cell information", "zh": "此分析需要周期晶胞信息"},
+    "analysis_no_mass": {"en": "One or more selected elements have no reliable atomic mass", "zh": "一个或多个所选元素没有可靠的原子质量"},
+    "analysis_temp_storage": {
+        "en": "Time-averaged MSD needs more temporary disk space. Reduce the selection, range, or stride.",
+        "zh": "时间平均 MSD 需要更多临时磁盘空间，请减小原子范围、帧区间或增大步长。",
+    },
+    "export_busy": {"en": "Another export is already running", "zh": "已有一项导出正在进行"},
+    "exported": {"en": "Exported {path}", "zh": "已导出 {path}"},
     "playback": {"en": "Playback", "zh": "播放"},
     "advanced": {"en": "Advanced", "zh": "高级"},
     "interface": {"en": "Interface", "zh": "界面"},
     "language": {"en": "Language", "zh": "语言"},
+    "theme": {"en": "Theme", "zh": "主题"},
+    "theme_system": {"en": "Follow system", "zh": "跟随系统"},
+    "theme_light": {"en": "Light", "zh": "浅色"},
+    "theme_dark": {"en": "Dark", "zh": "深色"},
     "inspector": {"en": "Show controls", "zh": "显示控制面板"},
     "representation": {"en": "Representation", "zh": "显示模式"},
     "ball_stick": {"en": "Ball-stick", "zh": "球棍"},
@@ -208,6 +333,11 @@ class MainWindowView(QMainWindow):
         self.ui_language = (
             stored_language if stored_language in {"en", "zh"} else "zh" if system_is_chinese else "en"
         )
+        self._qt_translator = QTranslator(self)
+        self._install_translator(self.ui_language)
+        stored_theme = str(self._settings.value("ui/theme", "light") or "light")
+        self.ui_theme = stored_theme if stored_theme in {"system", "light", "dark"} else "system"
+        self._applying_theme = False
         self._inspector_preferred_visible = True
         self._responsive_inspector_hidden = False
 
@@ -224,6 +354,15 @@ class MainWindowView(QMainWindow):
             self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton)
         )
         self.open_button.setIconSize(QSize(17, 17))
+
+        self.recent_button = QToolButton()
+        self.recent_button.setObjectName("recentButton")
+        self.recent_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.recent_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogListView)
+        )
+        self.recent_menu = QMenu(self.recent_button)
+        self.recent_button.setMenu(self.recent_menu)
 
         self.inspector_toggle_button = QToolButton()
         self.inspector_toggle_button.setObjectName("inspectorToggleButton")
@@ -365,6 +504,131 @@ class MainWindowView(QMainWindow):
         self.chain_selection_edit.textChanged.connect(self.on_chain_selection_changed)
         self.chain_selection_edit.editingFinished.connect(self.normalize_chain_selection)
 
+        self.selection_summary_label = QLabel()
+        self.selection_summary_label.setObjectName("selectionSummaryLabel")
+        self.selection_summary_label.setWordWrap(True)
+        self.clear_selection_button = QPushButton()
+        self.clear_selection_button.setEnabled(False)
+        self.clear_selection_button.clicked.connect(self.clear_selection)
+        self.focus_selection_button = QPushButton()
+        self.focus_selection_button.setEnabled(False)
+        self.focus_selection_button.clicked.connect(self.focus_selection)
+
+        self.measurement_draft_label = QLabel()
+        self.measurement_draft_label.setObjectName("measurementDraftLabel")
+        self.measurement_draft_label.setWordWrap(True)
+        self.measurement_pbc_check = QCheckBox()
+        self.measurement_pbc_check.setChecked(True)
+        self.measurement_pbc_check.toggled.connect(self.on_measurement_pbc_toggled)
+        self.pin_measurement_button = QPushButton()
+        self.pin_measurement_button.setEnabled(False)
+        self.pin_measurement_button.clicked.connect(self.create_measurement_from_selection)
+        self.measurement_combo = QComboBox()
+        self.measurement_combo.setEnabled(False)
+        self.measurement_combo.hide()
+        self.measurement_combo.currentIndexChanged.connect(self.on_measurement_selected)
+        self.remove_measurement_button = QPushButton()
+        self.remove_measurement_button.setEnabled(False)
+        self.remove_measurement_button.hide()
+        self.remove_measurement_button.clicked.connect(self.remove_selected_measurement)
+        self.analyze_measurement_button = QPushButton()
+        self.analyze_measurement_button.setEnabled(False)
+        self.analyze_measurement_button.clicked.connect(self.analyze_selected_measurement)
+
+        self.add_marker_button = QPushButton()
+        self.add_marker_button.setEnabled(False)
+        self.add_marker_button.clicked.connect(self.add_timeline_marker)
+        self.marker_combo = QComboBox()
+        self.marker_combo.setEnabled(False)
+        self.marker_combo.hide()
+        self.marker_combo.currentIndexChanged.connect(self.on_marker_selected)
+        self.remove_marker_button = QPushButton()
+        self.remove_marker_button.setEnabled(False)
+        self.remove_marker_button.hide()
+        self.remove_marker_button.clicked.connect(self.remove_selected_marker)
+        self.timeline_range_check = QCheckBox()
+        self.timeline_range_check.setEnabled(False)
+        self.timeline_range_check.toggled.connect(self.on_timeline_range_changed)
+        self.range_start_label = self._control_label()
+        self.range_end_label = self._control_label()
+        self.range_start_spin = QSpinBox()
+        self.range_end_spin = QSpinBox()
+        for spin in (self.range_start_spin, self.range_end_spin):
+            spin.setRange(1, 1)
+            spin.setEnabled(False)
+            spin.valueChanged.connect(self.on_timeline_range_changed)
+            spin.hide()
+        self.range_start_label.hide()
+        self.range_end_label.hide()
+
+        self.analysis_kind_combo = QComboBox()
+        for kind in ("density", "density_profile", "msd", "msd_windowed", "rmsd", "rmsf", "com", "rg"):
+            self.analysis_kind_combo.addItem("", kind)
+        self.analysis_kind_combo.setEnabled(False)
+        self.analysis_kind_combo.currentIndexChanged.connect(self.on_analysis_kind_changed)
+        self.analysis_scope_label = self._control_label()
+        self.analysis_scope_combo = QComboBox()
+        self.analysis_scope_combo.addItem("", "all")
+        self.analysis_scope_combo.addItem("", "selection")
+        self.analysis_scope_combo.setEnabled(False)
+        self.analysis_stride_label = self._control_label()
+        self.analysis_stride_spin = QSpinBox()
+        self.analysis_stride_spin.setRange(1, 1_000_000)
+        self.analysis_stride_spin.setValue(1)
+        self.analysis_stride_spin.setEnabled(False)
+        self.timestep_label = self._control_label()
+        self.timestep_spin = QDoubleSpinBox()
+        self.timestep_spin.setRange(0.0, 1.0e12)
+        self.timestep_spin.setDecimals(6)
+        self.timestep_spin.setValue(0.0)
+        self.timestep_spin.setEnabled(False)
+        self.time_unit_combo = QComboBox()
+        for unit in ("fs", "ps", "ns"):
+            self.time_unit_combo.addItem(unit, unit)
+        self.time_unit_combo.setCurrentIndex(1)
+        self.time_unit_combo.setEnabled(False)
+        self.analysis_pbc_check = QCheckBox()
+        self.analysis_pbc_check.setChecked(True)
+        self.analysis_pbc_check.setEnabled(False)
+        self.analysis_fit_check = QCheckBox()
+        self.analysis_fit_check.setChecked(True)
+        self.analysis_fit_check.setEnabled(False)
+        self.analysis_mass_check = QCheckBox()
+        self.analysis_mass_check.setChecked(True)
+        self.analysis_mass_check.setEnabled(False)
+        self.analysis_dimensions_label = self._control_label()
+        self.analysis_dimensions_combo = QComboBox()
+        for dimensions in ("xyz", "xy", "x", "y", "z"):
+            self.analysis_dimensions_combo.addItem(dimensions.upper(), dimensions)
+        self.analysis_max_lag_label = self._control_label()
+        self.analysis_max_lag_spin = QSpinBox()
+        self.analysis_max_lag_spin.setRange(0, 1_000_000_000)
+        self.analysis_max_lag_spin.setValue(0)
+        self.analysis_remove_drift_check = QCheckBox()
+        self.analysis_remove_drift_check.setChecked(False)
+        self.analysis_axis_label = self._control_label()
+        self.analysis_axis_combo = QComboBox()
+        for axis in ("x", "y", "z"):
+            self.analysis_axis_combo.addItem(axis.upper(), axis)
+        self.analysis_axis_combo.setCurrentIndex(2)
+        self.analysis_bins_label = self._control_label()
+        self.analysis_bins_spin = QSpinBox()
+        self.analysis_bins_spin.setRange(4, 4096)
+        self.analysis_bins_spin.setValue(100)
+        self.reference_frame_label = self._control_label()
+        self.reference_frame_spin = QSpinBox()
+        self.reference_frame_spin.setRange(1, 1)
+        self.run_analysis_button = QPushButton()
+        self.run_analysis_button.setEnabled(False)
+        self.run_analysis_button.clicked.connect(self.run_selected_analysis)
+        self.cancel_analysis_button = QPushButton()
+        self.cancel_analysis_button.setEnabled(False)
+        self.cancel_analysis_button.clicked.connect(self.cancel_analysis)
+        self.analysis_warning_label = QLabel()
+        self.analysis_warning_label.setObjectName("analysisWarningLabel")
+        self.analysis_warning_label.setWordWrap(True)
+        self.analysis_warning_label.hide()
+
         self.frame_label = self._value_label("")
         self.frame_label.setObjectName("frameLabel")
         self.frame_label.setMinimumWidth(145)
@@ -389,7 +653,7 @@ class MainWindowView(QMainWindow):
         self.progress_bar.setTextVisible(False)
         self.progress_bar.hide()
 
-        self.frame_slider = QSlider(Qt.Orientation.Horizontal)
+        self.frame_slider = TimelineWidget(self.timeline_model)
         self.frame_slider.setRange(0, 0)
         self.frame_slider.setEnabled(False)
         self.frame_slider.setTracking(False)
@@ -397,6 +661,8 @@ class MainWindowView(QMainWindow):
         self.frame_slider.sliderMoved.connect(self.on_frame_slider_moved)
         self.frame_slider.sliderReleased.connect(self.on_frame_slider_released)
         self.frame_slider.valueChanged.connect(self.on_frame_slider_changed)
+        self.frame_slider.markerRequested.connect(self.add_timeline_marker)
+        self.frame_slider.markerActivated.connect(self.seek_from_timeline)
 
         self.language_label = self._control_label()
         self.language_combo = QComboBox()
@@ -406,6 +672,14 @@ class MainWindowView(QMainWindow):
             max(0, self.language_combo.findData(self.ui_language))
         )
         self.language_combo.currentIndexChanged.connect(self.on_language_changed)
+
+        self.theme_label = self._control_label()
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("", "system")
+        self.theme_combo.addItem("", "light")
+        self.theme_combo.addItem("", "dark")
+        self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(self.ui_theme)))
+        self.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
 
         self.advanced_toggle = QToolButton()
         self.advanced_toggle.setObjectName("advancedToggle")
@@ -420,6 +694,14 @@ class MainWindowView(QMainWindow):
         advanced_layout.setContentsMargins(0, 2, 0, 0)
         advanced_layout.setSpacing(8)
         advanced_layout.addWidget(self.infer_bonds_check)
+        self.export_frame_button = QPushButton()
+        self.export_frame_button.setEnabled(False)
+        self.export_frame_button.clicked.connect(self.export_current_frame)
+        self.export_screenshot_button = QPushButton()
+        self.export_screenshot_button.setEnabled(False)
+        self.export_screenshot_button.clicked.connect(self.export_viewport_screenshot)
+        advanced_layout.addWidget(self.export_frame_button)
+        advanced_layout.addWidget(self.export_screenshot_button)
         self.advanced_content.hide()
 
         top_bar = self._build_top_bar()
@@ -432,17 +714,36 @@ class MainWindowView(QMainWindow):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.inspector_scroll.setWidget(self.inspector_panel)
-        self.inspector_scroll.setMinimumWidth(244)
-        self.inspector_scroll.setMaximumWidth(320)
+        self.inspector_scroll.setMinimumWidth(280)
+        self.inspector_scroll.setMaximumWidth(360)
 
         self.content_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.content_splitter.setObjectName("contentSplitter")
         self.content_splitter.setChildrenCollapsible(False)
-        self.content_splitter.addWidget(self.gl_view)
+        self.viewport_container = QWidget()
+        self.viewport_container.setObjectName("viewportContainer")
+        viewport_stack = QStackedLayout(self.viewport_container)
+        viewport_stack.setContentsMargins(0, 0, 0, 0)
+        viewport_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+        viewport_stack.addWidget(self.gl_view)
+        self.viewport_overlay = ViewportOverlay(self.gl_view, self.viewport_container)
+        viewport_stack.addWidget(self.viewport_overlay)
+        self.gl_view.viewChanged.connect(self.viewport_overlay.update)
+        self.drop_feedback_label = QLabel()
+        self.drop_feedback_label.setObjectName("dropFeedbackLabel")
+        self.drop_feedback_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.drop_feedback_label.setWordWrap(True)
+        self.drop_feedback_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.drop_feedback_label.hide()
+        viewport_stack.addWidget(self.drop_feedback_label)
+        self.content_splitter.addWidget(self.viewport_container)
         self.content_splitter.addWidget(self.inspector_scroll)
         self.content_splitter.setStretchFactor(0, 1)
         self.content_splitter.setStretchFactor(1, 0)
-        self.content_splitter.setSizes([1000, 280])
+        self.content_splitter.setSizes([1000, 320])
+
+        self.analysis_panel = self._build_analysis_panel()
+        self.analysis_panel.hide()
 
         transport_bar = self._build_transport_bar()
         layout = QVBoxLayout()
@@ -451,6 +752,7 @@ class MainWindowView(QMainWindow):
         layout.addWidget(top_bar)
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.content_splitter, stretch=1)
+        layout.addWidget(self.analysis_panel)
         layout.addWidget(transport_bar)
 
         central = QWidget()
@@ -461,6 +763,7 @@ class MainWindowView(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.retranslate_ui()
+        self.apply_theme()
 
     def _build_top_bar(self) -> QFrame:
         top_bar = QFrame()
@@ -469,6 +772,7 @@ class MainWindowView(QMainWindow):
         top_layout.setContentsMargins(12, 8, 10, 8)
         top_layout.setSpacing(12)
         top_layout.addWidget(self.open_button)
+        top_layout.addWidget(self.recent_button)
         file_layout = QVBoxLayout()
         file_layout.setContentsMargins(0, 0, 0, 0)
         file_layout.setSpacing(1)
@@ -506,8 +810,8 @@ class MainWindowView(QMainWindow):
         layout.addWidget(self.box_check)
         layout.addSpacing(10)
 
-        self.selection_section_label = self._section_label()
-        layout.addWidget(self.selection_section_label)
+        self.visibility_section_label = self._section_label()
+        layout.addWidget(self.visibility_section_label)
         layout.addWidget(self.filter_mode_segment)
         filter_value_layout = QHBoxLayout()
         filter_value_layout.setContentsMargins(0, 0, 0, 0)
@@ -516,6 +820,108 @@ class MainWindowView(QMainWindow):
         filter_value_layout.addWidget(self.filter_value_label)
         filter_value_layout.addWidget(self.chain_selection_edit, stretch=1)
         layout.addLayout(filter_value_layout)
+        layout.addSpacing(10)
+
+        self.selection_section_label = self._section_label()
+        layout.addWidget(self.selection_section_label)
+        layout.addWidget(self.selection_summary_label)
+        selection_actions = QHBoxLayout()
+        selection_actions.setContentsMargins(0, 0, 0, 0)
+        selection_actions.setSpacing(8)
+        selection_actions.addWidget(self.clear_selection_button)
+        selection_actions.addWidget(self.focus_selection_button)
+        layout.addLayout(selection_actions)
+        layout.addSpacing(10)
+
+        self.measurement_section_label = self._section_label()
+        layout.addWidget(self.measurement_section_label)
+        layout.addWidget(self.measurement_draft_label)
+        layout.addWidget(self.measurement_pbc_check)
+        measurement_actions = QHBoxLayout()
+        measurement_actions.setContentsMargins(0, 0, 0, 0)
+        measurement_actions.setSpacing(8)
+        measurement_actions.addWidget(self.pin_measurement_button)
+        measurement_actions.addWidget(self.analyze_measurement_button)
+        layout.addLayout(measurement_actions)
+        layout.addWidget(self.measurement_combo)
+        layout.addWidget(self.remove_measurement_button)
+        layout.addSpacing(10)
+
+        self.timeline_section_label = self._section_label()
+        layout.addWidget(self.timeline_section_label)
+        marker_actions = QHBoxLayout()
+        marker_actions.setContentsMargins(0, 0, 0, 0)
+        marker_actions.setSpacing(8)
+        marker_actions.addWidget(self.add_marker_button)
+        marker_actions.addWidget(self.remove_marker_button)
+        layout.addLayout(marker_actions)
+        layout.addWidget(self.marker_combo)
+        layout.addWidget(self.timeline_range_check)
+        range_layout = QHBoxLayout()
+        range_layout.setContentsMargins(0, 0, 0, 0)
+        range_layout.setSpacing(6)
+        range_layout.addWidget(self.range_start_label)
+        range_layout.addWidget(self.range_start_spin)
+        range_layout.addWidget(self.range_end_label)
+        range_layout.addWidget(self.range_end_spin)
+        layout.addLayout(range_layout)
+        layout.addSpacing(10)
+
+        self.analysis_section_label = self._section_label()
+        layout.addWidget(self.analysis_section_label)
+        layout.addWidget(self.analysis_kind_combo)
+        analysis_scope_layout = QHBoxLayout()
+        analysis_scope_layout.setContentsMargins(0, 0, 0, 0)
+        analysis_scope_layout.setSpacing(8)
+        analysis_scope_layout.addWidget(self.analysis_scope_label)
+        analysis_scope_layout.addWidget(self.analysis_scope_combo, stretch=1)
+        layout.addLayout(analysis_scope_layout)
+        analysis_stride_layout = QHBoxLayout()
+        analysis_stride_layout.setContentsMargins(0, 0, 0, 0)
+        analysis_stride_layout.setSpacing(8)
+        analysis_stride_layout.addWidget(self.analysis_stride_label)
+        analysis_stride_layout.addWidget(self.analysis_stride_spin, stretch=1)
+        layout.addLayout(analysis_stride_layout)
+        timestep_layout = QHBoxLayout()
+        timestep_layout.setContentsMargins(0, 0, 0, 0)
+        timestep_layout.setSpacing(8)
+        timestep_layout.addWidget(self.timestep_label)
+        timestep_layout.addWidget(self.timestep_spin, stretch=1)
+        timestep_layout.addWidget(self.time_unit_combo)
+        layout.addLayout(timestep_layout)
+        layout.addWidget(self.analysis_pbc_check)
+        layout.addWidget(self.analysis_fit_check)
+        layout.addWidget(self.analysis_mass_check)
+        direction_layout = QHBoxLayout()
+        direction_layout.setContentsMargins(0, 0, 0, 0)
+        direction_layout.setSpacing(6)
+        direction_layout.addWidget(self.analysis_dimensions_label)
+        direction_layout.addWidget(self.analysis_dimensions_combo)
+        direction_layout.addWidget(self.analysis_axis_label)
+        direction_layout.addWidget(self.analysis_axis_combo)
+        layout.addLayout(direction_layout)
+        msd_layout = QHBoxLayout()
+        msd_layout.setContentsMargins(0, 0, 0, 0)
+        msd_layout.setSpacing(8)
+        msd_layout.addWidget(self.analysis_max_lag_label)
+        msd_layout.addWidget(self.analysis_max_lag_spin, stretch=1)
+        layout.addLayout(msd_layout)
+        layout.addWidget(self.analysis_remove_drift_check)
+        numeric_layout = QHBoxLayout()
+        numeric_layout.setContentsMargins(0, 0, 0, 0)
+        numeric_layout.setSpacing(6)
+        numeric_layout.addWidget(self.analysis_bins_label)
+        numeric_layout.addWidget(self.analysis_bins_spin)
+        numeric_layout.addWidget(self.reference_frame_label)
+        numeric_layout.addWidget(self.reference_frame_spin)
+        layout.addLayout(numeric_layout)
+        layout.addWidget(self.analysis_warning_label)
+        analysis_actions = QHBoxLayout()
+        analysis_actions.setContentsMargins(0, 0, 0, 0)
+        analysis_actions.setSpacing(8)
+        analysis_actions.addWidget(self.run_analysis_button)
+        analysis_actions.addWidget(self.cancel_analysis_button)
+        layout.addLayout(analysis_actions)
         layout.addSpacing(10)
 
         self.playback_section_label = self._section_label()
@@ -540,8 +946,88 @@ class MainWindowView(QMainWindow):
         language_layout.addWidget(self.language_label)
         language_layout.addWidget(self.language_combo, stretch=1)
         layout.addLayout(language_layout)
+        theme_layout = QHBoxLayout()
+        theme_layout.setContentsMargins(0, 0, 0, 0)
+        theme_layout.setSpacing(8)
+        theme_layout.addWidget(self.theme_label)
+        theme_layout.addWidget(self.theme_combo, stretch=1)
+        layout.addLayout(theme_layout)
         layout.addStretch(1)
         return panel
+
+    def _build_analysis_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("analysisPanel")
+        panel.setMinimumHeight(190)
+        panel.setMaximumHeight(285)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 7, 12, 8)
+        layout.setSpacing(5)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        self.analysis_result_label = QLabel()
+        self.analysis_result_label.setObjectName("analysisResultLabel")
+        self.analysis_status_label = QLabel()
+        self.analysis_status_label.setObjectName("infoLabel")
+        self.analysis_progress = QProgressBar()
+        self.analysis_progress.setRange(0, 1)
+        self.analysis_progress.setValue(0)
+        self.analysis_progress.setMaximumWidth(130)
+        self.analysis_progress.hide()
+        self.export_analysis_button = QPushButton()
+        self.export_analysis_button.setEnabled(False)
+        self.export_analysis_button.clicked.connect(self.export_analysis_csv)
+        self.analysis_log_x_check = QCheckBox()
+        self.analysis_log_x_check.toggled.connect(self.on_analysis_log_axes_changed)
+        self.analysis_log_y_check = QCheckBox()
+        self.analysis_log_y_check.toggled.connect(self.on_analysis_log_axes_changed)
+        self.reset_analysis_plot_button = QToolButton()
+        self.reset_analysis_plot_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
+        )
+        self.reset_analysis_plot_button.clicked.connect(self.analysis_plot_reset)
+        self.export_analysis_plot_button = QToolButton()
+        self.export_analysis_plot_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)
+        )
+        self.export_analysis_plot_button.setEnabled(False)
+        self.export_analysis_plot_button.clicked.connect(self.export_analysis_plot_png)
+        self.close_analysis_button = QToolButton()
+        self.close_analysis_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton)
+        )
+        self.close_analysis_button.clicked.connect(panel.hide)
+        header.addWidget(self.analysis_result_label)
+        header.addWidget(self.analysis_status_label, stretch=1)
+        header.addWidget(self.analysis_progress)
+        header.addWidget(self.reset_analysis_plot_button)
+        header.addWidget(self.export_analysis_plot_button)
+        header.addWidget(self.export_analysis_button)
+        header.addWidget(self.close_analysis_button)
+        layout.addLayout(header)
+        plot_options = QHBoxLayout()
+        plot_options.setContentsMargins(0, 0, 0, 0)
+        plot_options.setSpacing(12)
+        plot_options.addWidget(self.analysis_log_x_check)
+        plot_options.addWidget(self.analysis_log_y_check)
+        plot_options.addStretch(1)
+        layout.addLayout(plot_options)
+        self.analysis_plot = AnalysisPlotWidget(panel)
+        self.analysis_plot.frameRequested.connect(self.seek_from_analysis)
+        layout.addWidget(self.analysis_plot, stretch=1)
+        return panel
+
+    def on_analysis_log_axes_changed(self) -> None:
+        self.analysis_plot.set_log_axes(
+            x=self.analysis_log_x_check.isChecked(),
+            y=self.analysis_log_y_check.isChecked(),
+        )
+
+    def analysis_plot_reset(self) -> None:
+        self.analysis_plot.reset_zoom()
+
+    def toggle_analysis_panel(self) -> None:
+        self.analysis_panel.setVisible(not self.analysis_panel.isVisible())
 
     def _build_transport_bar(self) -> QFrame:
         transport_bar = QFrame()
@@ -571,6 +1057,8 @@ class MainWindowView(QMainWindow):
         self.setWindowTitle(self._t("window_title"))
         self.open_button.setText(self._t("open"))
         self.open_button.setToolTip(self._t("open_tooltip"))
+        self.recent_button.setText(self._t("recent"))
+        self.recent_button.setToolTip(self._t("recent_tooltip"))
         self.inspector_toggle_button.setToolTip(self._t("inspector"))
         self.prev_button.setToolTip(self._t("previous_tooltip"))
         self.prev_button.setAccessibleName(self._t("previous"))
@@ -583,9 +1071,17 @@ class MainWindowView(QMainWindow):
         self.infer_bonds_check.setText(self._t("infer_bonds"))
         self.infer_bonds_check.setToolTip(self._t("infer_bonds_tooltip"))
         self.infer_bonds_check.setAccessibleName(self._t("infer_bonds"))
+        self.export_frame_button.setText(self._t("export_frame"))
+        self.export_frame_button.setToolTip(self._t("export_frame_tooltip"))
+        self.export_screenshot_button.setText(self._t("export_screenshot"))
+        self.export_screenshot_button.setToolTip(self._t("export_screenshot_tooltip"))
 
         self.display_section_label.setText(self._t("display"))
+        self.visibility_section_label.setText(self._t("visibility"))
         self.selection_section_label.setText(self._t("selection"))
+        self.measurement_section_label.setText(self._t("measurement"))
+        self.timeline_section_label.setText(self._t("timeline"))
+        self.analysis_section_label.setText(self._t("analysis"))
         self.playback_section_label.setText(self._t("playback"))
         self.interface_section_label.setText(self._t("interface"))
         self.advanced_toggle.setText(self._t("advanced"))
@@ -602,6 +1098,10 @@ class MainWindowView(QMainWindow):
         self.playback_speed_label.setText(self._t("speed"))
         self.playback_speed_slider.setToolTip(self._t("speed_tooltip"))
         self.language_label.setText(self._t("language"))
+        self.theme_label.setText(self._t("theme"))
+        for theme in ("system", "light", "dark"):
+            index = self.theme_combo.findData(theme)
+            self.theme_combo.setItemText(index, self._t(f"theme_{theme}"))
 
         for mode in ("all", "chain", "atom"):
             button = self.filter_mode_buttons[mode]
@@ -610,6 +1110,71 @@ class MainWindowView(QMainWindow):
             button.setAccessibleName(self._t(f"show_{mode}"))
         self.chain_selection_edit.setToolTip(self._t("chain_tooltip"))
         self.chain_selection_edit.setAccessibleName(self._t("show_chain"))
+        self.clear_selection_button.setText(self._t("clear_selection"))
+        self.clear_selection_button.setToolTip(self._t("clear_selection_tooltip"))
+        self.focus_selection_button.setText(self._t("focus_selection"))
+        self.focus_selection_button.setToolTip(self._t("focus_selection_tooltip"))
+        self.measurement_pbc_check.setText(self._t("measurement_pbc"))
+        self.pin_measurement_button.setText(self._t("pin_measurement"))
+        self.pin_measurement_button.setToolTip(self._t("pin_measurement_tooltip"))
+        self.remove_measurement_button.setText(self._t("remove_measurement"))
+        self.analyze_measurement_button.setText(self._t("analyze_measurement"))
+        self.add_marker_button.setText(self._t("add_marker"))
+        self.add_marker_button.setToolTip(self._t("add_marker_tooltip"))
+        self.remove_marker_button.setText(self._t("remove_marker"))
+        self.timeline_range_check.setText(self._t("playback_range"))
+        self.range_start_label.setText(self._t("range_start"))
+        self.range_end_label.setText(self._t("range_end"))
+        self.analysis_scope_label.setText(self._t("analysis_scope"))
+        self.analysis_stride_label.setText(self._t("analysis_stride"))
+        self.timestep_label.setText(self._t("timestep"))
+        self.timestep_spin.setSpecialValueText(self._t("timestep_unknown"))
+        analysis_kind = str(self.analysis_kind_combo.currentData() or "density")
+        self.analysis_pbc_check.setText(
+            self._t(
+                "analysis_pbc"
+                if analysis_kind in {"msd", "msd_windowed"}
+                else "analysis_pbc_make_whole"
+            )
+        )
+        self.analysis_fit_check.setText(self._t("analysis_fit"))
+        self.analysis_mass_check.setText(
+            self._t(
+                "analysis_mass_density"
+                if analysis_kind in {"density", "density_profile"}
+                else "analysis_mass"
+            )
+        )
+        self.analysis_dimensions_label.setText(self._t("analysis_dimensions"))
+        self.analysis_max_lag_label.setText(self._t("analysis_max_lag"))
+        self.analysis_max_lag_spin.setSpecialValueText(self._t("analysis_all_lags"))
+        self.analysis_remove_drift_check.setText(self._t("analysis_remove_drift"))
+        self.analysis_axis_label.setText(self._t("analysis_axis"))
+        self.analysis_bins_label.setText(self._t("analysis_bins"))
+        self.reference_frame_label.setText(self._t("reference_frame"))
+        for kind in ("density", "density_profile", "msd", "msd_windowed", "rmsd", "rmsf", "com", "rg"):
+            index = self.analysis_kind_combo.findData(kind)
+            self.analysis_kind_combo.setItemText(index, self._t(f"{kind}_name"))
+        self.analysis_scope_combo.setItemText(self.analysis_scope_combo.findData("all"), self._t("scope_all"))
+        self.analysis_scope_combo.setItemText(self.analysis_scope_combo.findData("selection"), self._t("scope_selection"))
+        self.run_analysis_button.setText(self._t("run_analysis"))
+        self.cancel_analysis_button.setText(self._t("cancel_analysis"))
+        self.export_analysis_button.setText(self._t("export_csv"))
+        self.analysis_log_x_check.setText(self._t("log_x"))
+        self.analysis_log_y_check.setText(self._t("log_y"))
+        self.reset_analysis_plot_button.setToolTip(self._t("reset_plot"))
+        self.reset_analysis_plot_button.setAccessibleName(self._t("reset_plot"))
+        self.export_analysis_plot_button.setToolTip(self._t("export_plot_tooltip"))
+        self.export_analysis_plot_button.setAccessibleName(self._t("export_plot"))
+        self.close_analysis_button.setToolTip(self._t("close_analysis"))
+        self.analysis_plot.set_empty_text(self._t("analysis_no_result"))
+        if not self.analysis_result_label.text():
+            self.analysis_result_label.setText(self._t("analysis"))
+            self.analysis_status_label.setText(self._t("analysis_idle"))
+        if hasattr(self, "update_selection_ui"):
+            self.update_selection_ui()
+        if hasattr(self, "update_measurement_ui"):
+            self.update_measurement_ui()
 
         commands = getattr(self, "commands", None)
         if commands is not None:
@@ -627,6 +1192,8 @@ class MainWindowView(QMainWindow):
         self.update_frame_label() if hasattr(self, "update_frame_label") else None
         if hasattr(self, "update_filter_value_label"):
             self.update_filter_value_label()
+        if hasattr(self, "update_recent_menu"):
+            self.update_recent_menu()
 
     def on_language_changed(self) -> None:
         selected = str(self.language_combo.currentData())
@@ -634,9 +1201,71 @@ class MainWindowView(QMainWindow):
             return
         self.ui_language = selected
         self._settings.setValue("ui/language", selected)
+        self._install_translator(selected)
         self.retranslate_ui()
         if getattr(self, "store", None) is not None and hasattr(self, "update_trajectory_info"):
             self.update_trajectory_info()
+
+    def on_theme_changed(self) -> None:
+        selected = str(self.theme_combo.currentData())
+        if selected not in {"system", "light", "dark"}:
+            return
+        self.ui_theme = selected
+        self._settings.setValue("ui/theme", selected)
+        self.apply_theme()
+
+    def apply_theme(self) -> None:
+        if self._applying_theme:
+            return
+        self._applying_theme = True
+        try:
+            app = QApplication.instance()
+            palette = resolve_theme(
+                self.ui_theme,
+                None if app is None else app.palette(),
+            )
+            self.setStyleSheet(build_stylesheet(palette))
+            self.gl_view.set_background_rgb(palette.viewport_bg)
+            selection = QColor(palette.selection)
+            self.gl_view.set_selection_color(
+                (selection.redF(), selection.greenF(), selection.blueF())
+            )
+            self.viewport_overlay.set_colors(
+                line=palette.selection,
+                draft=palette.accent,
+                text=palette.text,
+                background=palette.panel_bg,
+            )
+            self.analysis_plot.set_colors(
+                background=palette.panel_bg,
+                text=palette.text,
+                grid=palette.plot_grid,
+                cursor=palette.selection,
+                series=(
+                    palette.accent,
+                    palette.selection,
+                    palette.success,
+                    "#b58be0" if palette.theme_id == "dark" else "#7b4ab5",
+                    "#d79a45" if palette.theme_id == "dark" else "#c47a15",
+                ),
+            )
+            self.frame_slider.set_colors(
+                accent=palette.accent,
+                marker=palette.selection,
+                playback_range=palette.success,
+                cursor=palette.selection,
+            )
+        finally:
+            self._applying_theme = False
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if (
+            event.type() == QEvent.Type.PaletteChange
+            and getattr(self, "ui_theme", "light") == "system"
+            and hasattr(self, "theme_combo")
+        ):
+            self.apply_theme()
 
     def on_advanced_toggled(self, expanded: bool) -> None:
         self.advanced_content.setVisible(bool(expanded))
@@ -663,11 +1292,22 @@ class MainWindowView(QMainWindow):
         self.inspector_scroll.setVisible(visible)
 
     def _t(self, key: str, **values) -> str:
+        translated = QCoreApplication.translate("TrajPlayer", key)
+        if translated != key:
+            return translated.format(**values)
         translations = UI_TEXT.get(key)
         if translations is None:
             return key.format(**values)
         template = translations.get(self.ui_language, translations["en"])
         return template.format(**values)
+
+    def _install_translator(self, language: str) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.removeTranslator(self._qt_translator)
+        if self._qt_translator.load(str(translation_file(language))):
+            app.installTranslator(self._qt_translator)
 
     def _transport_button(self, pixmap: QStyle.StandardPixmap, icon_size: int) -> QToolButton:
         button = QToolButton()

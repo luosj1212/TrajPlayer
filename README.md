@@ -51,6 +51,15 @@ continue in the specialized tools users already prefer.
 - Ball-stick, Ball, and Bond representations with adjustable radii
 - Periodic box display and connected-chain or individual-atom isolation;
   chain lists and ranges can be entered as `1,3-5`
+- GPU atom picking with persistent canonical selections, focus controls, and
+  highlighted atoms without a second atom draw pass
+- Triclinic PBC-aware distance, angle, and dihedral measurements with pinned
+  viewport annotations and time-series analysis
+- Marker and playback-range timeline linked to a built-in line/heatmap plot
+- Cancellable background density, density profile, MSD, RMSD, RMSF, center of
+  mass, radius of gyration, and pinned-measurement analysis
+- Recent trajectory sources, Light/Dark/System themes, Qt Chinese/English
+  translations, current-frame export, screenshots, and CSV/plot export
 - Explicit bond-source status with optional static frame-1 inference
 - Responsive inspector layout with runtime Chinese and English interfaces
 - Portable Windows x64, Linux x86_64, and macOS Apple Silicon/Intel packages
@@ -66,7 +75,7 @@ are different from the source archive offered by **Code > Download ZIP**.
 ### Windows Portable Package
 
 1. Open GitHub Releases and download
-   `TrajPlayer-Windows-x64-v0.1.0-alpha.9.zip`, not the source-code ZIP.
+   `TrajPlayer-Windows-x64-v0.1.0-alpha.10.zip`, not the source-code ZIP.
 2. Extract the archive completely.
 3. Run `TrajPlayer\TrajPlayer.exe` from the extracted directory.
 4. Use **Open** or drag trajectory files into the application window.
@@ -91,7 +100,7 @@ extracted `TrajPlayer` folder and run:
 
 ### Linux Portable Package
 
-Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.9.tar.gz` from GitHub Releases
+Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.10.tar.gz` from GitHub Releases
 and extract the complete archive. Python is not required. Then run:
 
 ```bash
@@ -109,8 +118,8 @@ Generate the same report with
 Download the ZIP that matches the Mac:
 
 - Apple Silicon (M1 or newer):
-  `TrajPlayer-macOS-arm64-v0.1.0-alpha.9.zip`
-- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.9.zip`
+  `TrajPlayer-macOS-arm64-v0.1.0-alpha.10.zip`
+- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.10.zip`
 
 Extract the complete ZIP, then open `TrajPlayer-macOS/TrajPlayer.app`. Python
 and Conda are not required. The app can be moved to `/Applications` as a whole;
@@ -138,6 +147,25 @@ Generate a diagnostics report from Terminal with:
   also try to locate the topology when the trajectory is opened by itself.
 - On macOS, supported files can also be opened with `TrajPlayer.app` from
   Finder; simultaneous file-open events are combined before loading.
+
+### Interaction And Analysis
+
+- Click an atom to select it. Shift-click adds, Ctrl-click on Windows/Linux or
+  Cmd-click on macOS toggles, Alt-click removes, Esc clears, and F focuses.
+- Select two, three, or four atoms in order to create a distance, angle, or
+  dihedral. Enable Periodic minimum image for triclinic PBC-aware geometry.
+- Add timeline markers, restrict playback to a range, or click a frame-based
+  analysis curve to seek the trajectory.
+- Choose an analysis and atom scope in the Inspector. Long scans run in the
+  background, can be cancelled, and yield uncached I/O during playback and live
+  timeline scrubbing.
+- Frame number remains the default x axis. Set a positive frame interval only
+  when the trajectory's physical timestep is known.
+- Export the displayed frame as XYZ/extXYZ, save viewport or plot PNG images,
+  or export complete analysis values as CSV.
+
+Scientific definitions, PBC assumptions, and references are documented in
+[Scientific Analysis](docs/analysis.md).
 
 ## Supported Files
 
@@ -223,7 +251,8 @@ architecture.
 
 ```mermaid
 flowchart LR
-    UI["Qt view + QAction commands"] --> P["Playback clock"]
+    UI["Qt controls + QAction commands"] --> I["Picking + selection + measurement"]
+    UI --> P["Playback clock + timeline"]
     P --> Q["Generation-safe present scheduler"]
     D["Direct trajectory reader"] --> S["Caller-owned float32 frame slab"]
     S --> M["Adaptive RAM frame cache"]
@@ -232,30 +261,41 @@ flowchart LR
     L --> T["Exact render ticket"]
     T --> G["Position ring + canonical atom attributes"]
     G --> R["Instanced atom and bond draws"]
+    R --> I
     R --> V["paint-confirmed ticket"]
     V --> A["frameSwapped acknowledgement"]
     A --> P
+    D --> N["Serialized analysis frame provider"]
+    I --> N
+    N --> C["Cancellable NumPy analysis"]
+    C --> W["Cached line / heatmap plot"]
+    W --> P
 ```
 
 The Qt view is separated from the controller and background workers. The UI
 thread schedules work and submits one ready frame at a time; trajectory I/O,
-progressive indexing, decoding, and bond inference remain off it. Random-access
+progressive indexing, decoding, bond inference, export, and trajectory analysis
+remain off it. Random-access
 readers decode only the adaptive directional window and do not require a full
 decoded sidecar. A frame lease pins each RAM slot while the renderer owns the
 current frame, avoiding a second full-frame CPU copy.
 Playback advances only after the submitted ticket is painted and then receives
 its `frameSwapped` acknowledgement. Slow hardware therefore lowers cadence
 instead of skipping trajectory frames or blocking controls with synchronous
-painting.
+painting. Analysis owns one reusable frame slab, and its uncached reads yield
+to playback and live scrubbing. Plot data is cached separately from its
+lightweight moving cursor.
 
 ## Reference Performance
 
-One local synthetic benchmark on an NVIDIA GeForce RTX 4070 Laptop GPU,
-OpenGL 3.3, with GPU completion timing enabled produced:
+One local alpha.10 synthetic benchmark on an NVIDIA GeForce RTX 4070 Laptop
+GPU, OpenGL 3.3, with GPU completion timing enabled produced:
 
-| Scene | Cadence | Paint | Position upload | Paint + upload |
+| Scene | Cadence | Paint p95 | Position upload p95 | Event p95 |
 | --- | ---: | ---: | ---: | ---: |
-| 100,000 atoms + 99,999 bonds | 59.9 FPS | 2.45 ms avg | 0.35 ms avg | 2.80 ms avg |
+| 100,000 atoms + 99,999 bonds | 60.00 FPS | 2.83 ms | 0.39 ms | n/a |
+| 1,000,000 atoms while rotating | 62.39 FPS | 6.41 ms | no frame update | 23.02 ms camera stop |
+| 1,000,000 atom GPU picking | n/a | n/a | n/a | 5.37 ms pick |
 
 This is a reference result, not a hardware-independent guarantee. Display
 refresh, GPU driver, bond count, window size, and cache state all affect the
@@ -325,7 +365,13 @@ sudo apt-get install libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 \
 
 - macOS alpha packages are not yet notarized with an Apple Developer ID
 - No ribbon, molecular surface, volume, label, or publication renderer
-- No built-in RMSD/RMSF analysis, measurements, scripting API, or video export
+- No scripting API, statistical error analysis, automatic diffusion coefficient,
+  video export, or publication-grade vector plot export
+- PBC make-whole for RMSD/RMSF, COM, and Rg is anchor-relative and is intended
+  for one connected molecule or selection rather than an arbitrary disconnected
+  whole system
+- Physical time is not inferred; analyses use frame number until a timestep is
+  supplied explicitly
 - XTC/TRR requires a compatible GRO topology
 - XYZ/extXYZ creates a small reusable `.tpindex` offset index beside the source
   when that location is writable, with a per-user cache fallback otherwise

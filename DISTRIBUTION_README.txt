@@ -1,4 +1,4 @@
-TrajPlayer v0.1.0-alpha.9 distribution
+TrajPlayer v0.1.0-alpha.10 distribution
 
 Windows
 1. Extract the entire TrajPlayer folder from the zip archive.
@@ -51,6 +51,14 @@ Display
 - Use All, Chain, and Atom to control visibility. Chain accepts entries such as 1,3-5; Atom uses the adjacent slider.
 - Bond status states when bonds were inferred from frame 1; clear Infer bonds to disable that static inference.
 - Playback speed is adjustable from 1 to 60 FPS. Frames are always displayed in sequence and are never skipped.
+
+Interaction and analysis
+- Click atoms to select them. Shift adds, Ctrl/Cmd toggles, Esc clears, and F focuses the current selection.
+- Select two, three, or four atoms to measure a distance, angle, or dihedral. Periodic minimum-image geometry supports triclinic cells.
+- The timeline supports markers and an optional playback range. Analysis curves can seek the viewer when their horizontal axis represents trajectory frames.
+- Density, density profile, MSD, RMSD, RMSF, center of mass, radius of gyration, and pinned-measurement time series run in a cancellable background task.
+- Export the current frame as XYZ/extXYZ, the current viewport or analysis plot as PNG, and complete analysis values as CSV.
+- Physical time is shown only after a timestep is supplied. Periodic MSD requires continuous no-jump coordinates; TrajPlayer attempts frame-by-frame unwrapping when cell data is available.
 
 Performance
 - Traj, XTC, and TRR trajectories decode the requested directional window directly instead of creating a full float32 sidecar.

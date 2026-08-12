@@ -4,6 +4,7 @@ from pathlib import Path
 
 from trajplayer.trajectory_source import (
     TrajectorySelectionError,
+    drop_requires_gro,
     paths_are_supported_for_drop,
     resolve_trajectory_source,
 )
@@ -51,6 +52,11 @@ class TrajectorySourceTests(unittest.TestCase):
         self.assertFalse(
             paths_are_supported_for_drop((Path("a.gro"), Path("b.xtc"), Path("c.trr")))
         )
+
+    def test_drop_only_requests_gro_for_gromacs_trajectory_without_topology(self) -> None:
+        self.assertTrue(drop_requires_gro((Path("run.xtc"),)))
+        self.assertFalse(drop_requires_gro((Path("run.xtc"), Path("run.gro"))))
+        self.assertFalse(drop_requires_gro((Path("a.xyz"), Path("b.xyz"))))
 
 
 if __name__ == "__main__":

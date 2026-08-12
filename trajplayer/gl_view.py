@@ -6,10 +6,19 @@ from collections.abc import Callable
 
 import numpy as np
 from shiboken6 import VoidPtr
-from PySide6.QtCore import QByteArray, QPoint, QTimer, Qt, Signal
-from PySide6.QtGui import QMatrix4x4, QMouseEvent, QSurfaceFormat, QVector3D, QWheelEvent
+from PySide6.QtCore import QByteArray, QPoint, QPointF, QSize, QTimer, Qt, Signal
+from PySide6.QtGui import (
+    QMatrix4x4,
+    QMouseEvent,
+    QSurfaceFormat,
+    QVector3D,
+    QVector4D,
+    QWheelEvent,
+)
 from PySide6.QtOpenGL import (
     QOpenGLBuffer,
+    QOpenGLFramebufferObject,
+    QOpenGLFramebufferObjectFormat,
     QOpenGLShader,
     QOpenGLShaderProgram,
     QOpenGLTexture,
@@ -18,6 +27,12 @@ from PySide6.QtOpenGL import (
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from .element_style import atom_render_arrays
+from .interaction.picking import (
+    MAX_RGBA8_PICK_ID,
+    PickResult,
+    decode_pick_id_rgba8,
+    physical_pick_pixel,
+)
 from .present_scheduler import RenderTicket
 from .render_stats import RenderStats
 from .trajcore import (
@@ -28,6 +43,8 @@ from .trajcore import (
 
 
 GL_FLOAT = 0x1406
+GL_UNSIGNED_INT = 0x1405
+GL_UNSIGNED_BYTE = 0x1401
 GL_LINES = 0x0001
 GL_TRIANGLE_STRIP = 0x0005
 GL_COLOR_BUFFER_BIT = 0x00004000
@@ -39,7 +56,15 @@ GL_ONE_MINUS_SRC_ALPHA = 0x0303
 GL_TEXTURE0 = 0x84C0
 GL_TEXTURE_BUFFER = 0x8C2A
 GL_R32F = 0x822E
+GL_R8UI = 0x8232
+GL_R32UI = 0x8236
+GL_RGBA8 = 0x8058
 GL_RGB32F = 0x8815
+GL_RED_INTEGER = 0x8D94
+GL_RGBA = 0x1908
+GL_DEPTH_COMPONENT = 0x1902
+GL_FRAMEBUFFER = 0x8D40
+GL_COLOR = 0x1800
 GL_VENDOR = 0x1F00
 GL_RENDERER = 0x1F01
 GL_VERSION = 0x1F02
@@ -62,6 +87,7 @@ BOND_NEUTRAL_COLOR = (0.40, 0.40, 0.38)
 BOND_ENDPOINT_RADIUS_SCALE = 0.92
 BOND_MAX_ENDPOINT_LENGTH_FRACTION = 0.45
 BOX_COLOR = (0.18, 0.18, 0.18)
+DEFAULT_SELECTION_COLOR = (0.02, 0.58, 0.74)
 RENDER_MODE_BALL_STICK = "ball_stick"
 RENDER_MODE_BALL = "ball"
 RENDER_MODE_BOND = "bond"
@@ -299,6 +325,8 @@ uniform samplerBuffer u_positions;
 uniform samplerBuffer u_atom_radii;
 uniform samplerBuffer u_atom_colors;
 uniform samplerBuffer u_atom_anchors;
+uniform usamplerBuffer u_atom_selection;
+uniform int u_has_selection;
 uniform float u_atom_size_scale;
 uniform int u_has_periodic_cell;
 uniform vec3 u_cell_a;
@@ -314,6 +342,7 @@ out vec2 v_corner;
 out vec3 v_color;
 out vec3 v_view_center;
 out float v_radius;
+flat out uint v_selected;
 
 vec3 position_at(int atom_index) {{
     int offset = atom_index * 3;
@@ -374,17 +403,22 @@ void main() {{
     v_color = texelFetch(u_atom_colors, atom_index).rgb;
     v_view_center = center.xyz;
     v_radius = radius;
+    v_selected = u_has_selection != 0
+        ? texelFetch(u_atom_selection, atom_index).r
+        : uint(0);
 }}
 """
 
 
 FRAGMENT_SHADER_BODY = """
 uniform mat4 u_proj;
+uniform vec3 u_selection_color;
 
 in vec2 v_corner;
 in vec3 v_color;
 in vec3 v_view_center;
 in float v_radius;
+flat in uint v_selected;
 out vec4 frag_color;
 
 void main() {
@@ -408,6 +442,9 @@ void main() {
     float z14 = z8 * z4 * z2;
     vec3 color = (v_color * edge_shadow * (0.20 + 0.80 * diffuse) + vec3(0.12) * z14) * rim_shadow;
     color = mix(color, vec3(0.045), 0.34 * atom_outline);
+    if (v_selected != 0u) {
+        color = mix(color, u_selection_color, 0.34 + 0.38 * atom_outline);
+    }
     frag_color = vec4(color, 1.0);
 }
 """
@@ -420,6 +457,145 @@ CONSERVATIVE_FRAGMENT_SHADER = (
     "layout(depth_less) out float gl_FragDepth;\n"
     + FRAGMENT_SHADER_BODY
 )
+
+
+PICK_VERTEX_SHADER = f"""
+#version 330 core
+layout(location = 1) in float a_atom_index;
+
+uniform mat4 u_view;
+uniform mat4 u_proj;
+uniform samplerBuffer u_positions;
+uniform samplerBuffer u_atom_radii;
+uniform samplerBuffer u_atom_anchors;
+uniform float u_atom_size_scale;
+uniform int u_has_periodic_cell;
+uniform vec3 u_cell_a;
+uniform vec3 u_cell_b;
+uniform vec3 u_cell_c;
+uniform vec3 u_inv_cell_0;
+uniform vec3 u_inv_cell_1;
+uniform vec3 u_inv_cell_2;
+
+const float MIN_RADIUS_NDC_X = {MIN_ATOM_RADIUS_NDC_X:.8f};
+
+out vec2 v_corner;
+out vec3 v_view_center;
+out float v_radius;
+flat out uint v_pick_id;
+
+vec3 position_at(int atom_index) {{
+    int offset = atom_index * 3;
+    return vec3(
+        texelFetch(u_positions, offset).r,
+        texelFetch(u_positions, offset + 1).r,
+        texelFetch(u_positions, offset + 2).r
+    );
+}}
+
+vec3 minimum_image_delta(vec3 delta) {{
+    vec3 fractional = vec3(
+        dot(delta, u_inv_cell_0),
+        dot(delta, u_inv_cell_1),
+        dot(delta, u_inv_cell_2)
+    );
+    fractional -= round(fractional);
+    return u_cell_a * fractional.x + u_cell_b * fractional.y + u_cell_c * fractional.z;
+}}
+
+vec3 display_position(int atom_index, int anchor_index) {{
+    vec3 position = position_at(atom_index);
+    if (u_has_periodic_cell == 0 || anchor_index < 0) {{
+        return position;
+    }}
+    vec3 anchor = position_at(anchor_index);
+    return anchor + minimum_image_delta(position - anchor);
+}}
+
+void main() {{
+    int id = gl_VertexID & 3;
+    vec2 corner = vec2(
+        (id == 1 || id == 3) ? 1.0 : -1.0,
+        (id >= 2) ? 1.0 : -1.0
+    );
+    int atom_index = int(a_atom_index + 0.5);
+    int anchor_index = int(texelFetch(u_atom_anchors, atom_index).r);
+    vec3 atom_position = display_position(atom_index, anchor_index);
+    vec4 center = u_view * vec4(atom_position, 1.0);
+    float radius = max(
+        texelFetch(u_atom_radii, atom_index).r * u_atom_size_scale,
+        0.001
+    );
+    vec4 clip_center = u_proj * center;
+    vec4 clip_edge = u_proj * vec4(center.xyz + vec3(radius, 0.0, 0.0), 1.0);
+    float aspect = u_proj[1][1] / max(u_proj[0][0], 0.0001);
+    float radius_ndc_x = max(
+        abs((clip_edge.x / clip_edge.w) - (clip_center.x / clip_center.w)),
+        MIN_RADIUS_NDC_X
+    );
+    vec2 ndc_offset = corner * vec2(radius_ndc_x, radius_ndc_x * aspect);
+    gl_Position = clip_center;
+    gl_Position.xy += ndc_offset * gl_Position.w;
+    v_corner = corner;
+    v_view_center = center.xyz;
+    v_radius = radius;
+    v_pick_id = uint(atom_index + 1);
+}}
+"""
+
+
+PICK_FRAGMENT_SHADER = """
+#version 330 core
+uniform mat4 u_proj;
+
+in vec2 v_corner;
+in vec3 v_view_center;
+in float v_radius;
+flat in uint v_pick_id;
+layout(location = 0) out uint frag_id;
+
+void main() {
+    float r2 = dot(v_corner, v_corner);
+    if (r2 > 1.0) {
+        discard;
+    }
+    float z = sqrt(max(0.0, 1.0 - r2));
+    vec3 surface_view = v_view_center + vec3(v_corner * v_radius, z * v_radius);
+    vec4 surface_clip = u_proj * vec4(surface_view, 1.0);
+    gl_FragDepth = clamp(surface_clip.z / surface_clip.w * 0.5 + 0.5, 0.0, 1.0);
+    frag_id = v_pick_id;
+}
+"""
+
+
+PICK_RGBA_FRAGMENT_SHADER = """
+#version 330 core
+uniform mat4 u_proj;
+
+in vec2 v_corner;
+in vec3 v_view_center;
+in float v_radius;
+flat in uint v_pick_id;
+layout(location = 0) out vec4 frag_color;
+
+void main() {
+    float r2 = dot(v_corner, v_corner);
+    if (r2 > 1.0) {
+        discard;
+    }
+    float z = sqrt(max(0.0, 1.0 - r2));
+    vec3 surface_view = v_view_center + vec3(v_corner * v_radius, z * v_radius);
+    vec4 surface_clip = u_proj * vec4(surface_view, 1.0);
+    gl_FragDepth = clamp(surface_clip.z / surface_clip.w * 0.5 + 0.5, 0.0, 1.0);
+    uint value = v_pick_id;
+    frag_color = vec4(
+        float(value & 255u),
+        float((value >> 8u) & 255u),
+        float((value >> 16u) & 255u),
+        255.0
+    ) / 255.0;
+}
+"""
 
 
 BOND_VERTEX_SHADER = f"""
@@ -602,6 +778,9 @@ class MoleculeGLWidget(QOpenGLWidget):
     """GPU instanced molecule view; Qt is only the host surface."""
 
     renderTicketPainted = Signal(object)
+    atomPicked = Signal(object, object)
+    atomDoubleClicked = Signal(object, object)
+    viewChanged = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -611,6 +790,8 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._program: QOpenGLShaderProgram | None = None
         self._bond_program: QOpenGLShaderProgram | None = None
         self._box_program: QOpenGLShaderProgram | None = None
+        self._pick_program: QOpenGLShaderProgram | None = None
+        self._pick_rgba_program: QOpenGLShaderProgram | None = None
         self._vao = QOpenGLVertexArrayObject()
         self._bond_vao = QOpenGLVertexArrayObject()
         self._box_vao = QOpenGLVertexArrayObject()
@@ -630,6 +811,7 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._radius_vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
         self._color_vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
         self._atom_unwrap_anchor_vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
+        self._selection_vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
         self._bond_data_vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
         self._bond_color_vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
         self._box_vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
@@ -638,6 +820,7 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._radius_texture: QOpenGLTexture | None = None
         self._color_texture: QOpenGLTexture | None = None
         self._atom_unwrap_anchor_texture: QOpenGLTexture | None = None
+        self._selection_texture: QOpenGLTexture | None = None
         self._position_buffer_index = -1
         self._gl = None
         self._loc_view = -1
@@ -646,7 +829,10 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._loc_atom_radii = -1
         self._loc_atom_colors = -1
         self._loc_atom_anchors = -1
+        self._loc_atom_selection = -1
+        self._loc_has_selection = -1
         self._loc_atom_size_scale = -1
+        self._loc_selection_color = -1
         self._loc_has_periodic_cell = -1
         self._loc_cell_vectors = (-1, -1, -1)
         self._loc_inverse_columns = (-1, -1, -1)
@@ -661,6 +847,15 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._bond_loc_inverse_columns = (-1, -1, -1)
         self._box_loc_view = -1
         self._box_loc_proj = -1
+        self._pick_loc_view = -1
+        self._pick_loc_proj = -1
+        self._pick_loc_positions = -1
+        self._pick_loc_atom_radii = -1
+        self._pick_loc_atom_anchors = -1
+        self._pick_loc_atom_size_scale = -1
+        self._pick_loc_has_periodic_cell = -1
+        self._pick_loc_cell_vectors = (-1, -1, -1)
+        self._pick_loc_inverse_columns = (-1, -1, -1)
         self._viewport_size = (1, 1)
 
         self._atom_count = 0
@@ -674,6 +869,9 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._visible_atom_indices_gpu = np.empty((0,), dtype=np.float32)
         self._atom_unwrap_anchor_indices = np.empty((0,), dtype=np.int32)
         self._atom_visible_mask = np.empty((0,), dtype=np.bool_)
+        self._selection_flags = np.empty((0,), dtype=np.uint8)
+        self._selected_atom_indices = np.empty((0,), dtype=np.uint32)
+        self._selection_color = DEFAULT_SELECTION_COLOR
         self._visible_atom_count = 0
         self._all_atoms_visible = False
         self._has_unwrap_anchors = False
@@ -704,6 +902,13 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._pitch = -18.0
         self._distance = 40.0
         self._last_mouse_pos: QPoint | None = None
+        self._mouse_press_pos: QPoint | None = None
+        self._mouse_dragged = False
+        self._frame_revision = 0
+        self._pick_fbo: QOpenGLFramebufferObject | None = None
+        self._pick_fbo_size = (0, 0)
+        self._pick_fbo_integer = True
+        self._gpu_picking_available = True
         self._background = DEFAULT_BACKGROUND
         self._benchmark_finish_gpu = False
         self._render_stats: RenderStats | None = None
@@ -755,6 +960,9 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._radii = self._radii_for_render_mode(self._render_mode)
         self._colors = colors
         self._positions = np.zeros((self._atom_count, 3), dtype=np.float32)
+        self._frame_revision += 1
+        self._selection_flags = np.zeros(self._atom_count, dtype=np.uint8)
+        self._selected_atom_indices = np.empty((0,), dtype=np.uint32)
         self._atom_unwrap_anchor_indices = np.full(
             self._atom_count,
             -1,
@@ -793,6 +1001,129 @@ class MoleculeGLWidget(QOpenGLWidget):
     @property
     def bond_count(self) -> int:
         return self._bond_instance_count
+
+    @property
+    def selected_atom_indices(self) -> np.ndarray:
+        values = self._selected_atom_indices.view()
+        values.setflags(write=False)
+        return values
+
+    @property
+    def picking_backend(self) -> str:
+        if not self._gpu_picking_available:
+            return "cpu"
+        return "gpu-r32ui" if self._pick_fbo_integer else "gpu-rgba8"
+
+    @property
+    def frame_revision(self) -> int:
+        return self._frame_revision
+
+    @property
+    def current_positions(self) -> np.ndarray:
+        values = self._positions.view()
+        values.setflags(write=False)
+        return values
+
+    @property
+    def current_cell(self) -> np.ndarray | None:
+        if not self._box_has_cell:
+            return None
+        values = self._box_cell.view()
+        values.setflags(write=False)
+        return values
+
+    def project_world_positions(
+        self,
+        positions: np.ndarray,
+    ) -> tuple[tuple[QPointF, ...], np.ndarray]:
+        """Project a small set of world points into logical widget pixels."""
+
+        points = np.asarray(positions, dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError("positions must have shape (N, 3)")
+        view, projection = self._camera_matrices()
+        matrix = projection * view
+        projected: list[QPointF] = []
+        visible = np.zeros(points.shape[0], dtype=np.bool_)
+        width = max(1, self.width())
+        height = max(1, self.height())
+        for index, point in enumerate(points):
+            clip = matrix.map(
+                QVector4D(float(point[0]), float(point[1]), float(point[2]), 1.0)
+            )
+            if clip.w() <= 1.0e-12:
+                projected.append(QPointF())
+                continue
+            ndc_x = clip.x() / clip.w()
+            ndc_y = clip.y() / clip.w()
+            ndc_z = clip.z() / clip.w()
+            projected.append(
+                QPointF(
+                    (ndc_x + 1.0) * 0.5 * width,
+                    (1.0 - ndc_y) * 0.5 * height,
+                )
+            )
+            visible[index] = (
+                -1.0 <= ndc_x <= 1.0
+                and -1.0 <= ndc_y <= 1.0
+                and -1.0 <= ndc_z <= 1.0
+            )
+        visible.setflags(write=False)
+        return tuple(projected), visible
+
+    def set_selection(
+        self,
+        atom_indices: np.ndarray | None,
+        *,
+        color: tuple[float, float, float] | None = None,
+    ) -> None:
+        if atom_indices is None:
+            indices = np.empty((0,), dtype=np.uint32)
+        else:
+            values = np.asarray(atom_indices, dtype=np.int64)
+            if values.ndim != 1:
+                raise ValueError("atom_indices must be one-dimensional")
+            if values.size and (int(values.min()) < 0 or int(values.max()) >= self._atom_count):
+                raise IndexError("Selection contains an atom outside the current frame")
+            indices = np.unique(values).astype(np.uint32, copy=False)
+        if color is not None:
+            selection_color = tuple(float(channel) for channel in color)
+            if len(selection_color) != 3 or not all(
+                math.isfinite(channel) and 0.0 <= channel <= 1.0
+                for channel in selection_color
+            ):
+                raise ValueError("Selection color must be three finite channels in [0, 1]")
+            self._selection_color = selection_color
+        if np.array_equal(indices, self._selected_atom_indices):
+            self.update()
+            return
+        self._selected_atom_indices = np.ascontiguousarray(indices, dtype=np.uint32)
+        self._selection_flags = np.zeros(self._atom_count, dtype=np.uint8)
+        if indices.size:
+            self._selection_flags[indices] = 1
+        if self.isValid():
+            self.makeCurrent()
+            self._upload_selection_buffer()
+            self.doneCurrent()
+        self.update()
+
+    def set_selection_color(self, color: tuple[float, float, float]) -> None:
+        self.set_selection(self._selected_atom_indices, color=color)
+
+    def focus_atoms(self, atom_indices: np.ndarray) -> None:
+        indices = np.asarray(atom_indices, dtype=np.int32)
+        if indices.ndim != 1 or indices.size == 0:
+            return
+        if int(indices.min()) < 0 or int(indices.max()) >= self._atom_count:
+            raise IndexError("Focus contains an atom outside the current frame")
+        self._fit_camera_to_frame(
+            self._display_positions(indices),
+            include_box=False,
+            minimum_radius=1.8,
+        )
+        self._depth_sort_timer.start()
+        self.viewChanged.emit()
+        self.update()
 
     def set_render_mode(self, mode: str) -> None:
         normalized = str(mode).strip().lower()
@@ -968,6 +1299,7 @@ class MoleculeGLWidget(QOpenGLWidget):
         self.release_frame_reference()
         self.set_cell(cell)
         self._positions = frame
+        self._frame_revision += 1
         self._frame_release = release_callback
         self._pending_render_ticket = render_ticket
         self._frame_upload_pending = True
@@ -978,6 +1310,7 @@ class MoleculeGLWidget(QOpenGLWidget):
                 minimum_radius=1.8 if self._visible_atom_count < self._atom_count else 1.0,
             )
             self._depth_order_dirty = True
+        self.viewChanged.emit()
         self.update()
 
     def release_frame_reference(self) -> None:
@@ -998,6 +1331,7 @@ class MoleculeGLWidget(QOpenGLWidget):
             include_box=self._visible_atom_count == self._atom_count,
             minimum_radius=1.8 if self._visible_atom_count < self._atom_count else 1.0,
         )
+        self.viewChanged.emit()
         self.update()
 
     def initializeGL(self) -> None:  # type: ignore[override]
@@ -1036,7 +1370,10 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._loc_atom_radii = self._program.uniformLocation("u_atom_radii")
         self._loc_atom_colors = self._program.uniformLocation("u_atom_colors")
         self._loc_atom_anchors = self._program.uniformLocation("u_atom_anchors")
+        self._loc_atom_selection = self._program.uniformLocation("u_atom_selection")
+        self._loc_has_selection = self._program.uniformLocation("u_has_selection")
         self._loc_atom_size_scale = self._program.uniformLocation("u_atom_size_scale")
+        self._loc_selection_color = self._program.uniformLocation("u_selection_color")
         self._loc_has_periodic_cell = self._program.uniformLocation(
             "u_has_periodic_cell"
         )
@@ -1053,7 +1390,10 @@ class MoleculeGLWidget(QOpenGLWidget):
             self._loc_atom_radii,
             self._loc_atom_colors,
             self._loc_atom_anchors,
+            self._loc_atom_selection,
+            self._loc_has_selection,
             self._loc_atom_size_scale,
+            self._loc_selection_color,
             self._loc_has_periodic_cell,
             *self._loc_cell_vectors,
             *self._loc_inverse_columns,
@@ -1106,6 +1446,65 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._box_loc_view = self._box_program.uniformLocation("u_view")
         self._box_loc_proj = self._box_program.uniformLocation("u_proj")
 
+        self._pick_program = QOpenGLShaderProgram(self)
+        if not self._pick_program.addShaderFromSourceCode(
+            QOpenGLShader.ShaderTypeBit.Vertex,
+            PICK_VERTEX_SHADER,
+        ):
+            raise RuntimeError(self._pick_program.log())
+        if not self._pick_program.addShaderFromSourceCode(
+            QOpenGLShader.ShaderTypeBit.Fragment,
+            PICK_FRAGMENT_SHADER,
+        ):
+            raise RuntimeError(self._pick_program.log())
+        if not self._pick_program.link():
+            raise RuntimeError(self._pick_program.log())
+        self._pick_loc_view = self._pick_program.uniformLocation("u_view")
+        self._pick_loc_proj = self._pick_program.uniformLocation("u_proj")
+        self._pick_loc_positions = self._pick_program.uniformLocation("u_positions")
+        self._pick_loc_atom_radii = self._pick_program.uniformLocation("u_atom_radii")
+        self._pick_loc_atom_anchors = self._pick_program.uniformLocation("u_atom_anchors")
+        self._pick_loc_atom_size_scale = self._pick_program.uniformLocation(
+            "u_atom_size_scale"
+        )
+        self._pick_loc_has_periodic_cell = self._pick_program.uniformLocation(
+            "u_has_periodic_cell"
+        )
+        self._pick_loc_cell_vectors = tuple(
+            self._pick_program.uniformLocation(name)
+            for name in ("u_cell_a", "u_cell_b", "u_cell_c")
+        )
+        self._pick_loc_inverse_columns = tuple(
+            self._pick_program.uniformLocation(name)
+            for name in ("u_inv_cell_0", "u_inv_cell_1", "u_inv_cell_2")
+        )
+        if min(
+            self._pick_loc_view,
+            self._pick_loc_proj,
+            self._pick_loc_positions,
+            self._pick_loc_atom_radii,
+            self._pick_loc_atom_anchors,
+            self._pick_loc_atom_size_scale,
+            self._pick_loc_has_periodic_cell,
+            *self._pick_loc_cell_vectors,
+            *self._pick_loc_inverse_columns,
+        ) < 0:
+            raise RuntimeError("Picking shader uniforms are unavailable")
+
+        self._pick_rgba_program = QOpenGLShaderProgram(self)
+        if not self._pick_rgba_program.addShaderFromSourceCode(
+            QOpenGLShader.ShaderTypeBit.Vertex,
+            PICK_VERTEX_SHADER,
+        ):
+            raise RuntimeError(self._pick_rgba_program.log())
+        if not self._pick_rgba_program.addShaderFromSourceCode(
+            QOpenGLShader.ShaderTypeBit.Fragment,
+            PICK_RGBA_FRAGMENT_SHADER,
+        ):
+            raise RuntimeError(self._pick_rgba_program.log())
+        if not self._pick_rgba_program.link():
+            raise RuntimeError(self._pick_rgba_program.log())
+
         self._vao.create()
         self._bond_vao.create()
         self._box_vao.create()
@@ -1117,6 +1516,7 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._radius_vbo.create()
         self._color_vbo.create()
         self._atom_unwrap_anchor_vbo.create()
+        self._selection_vbo.create()
         self._bond_data_vbo.create()
         self._bond_color_vbo.create()
         self._box_vbo.create()
@@ -1131,6 +1531,7 @@ class MoleculeGLWidget(QOpenGLWidget):
         self._atom_unwrap_anchor_texture = self._create_buffer_texture(
             "atom unwrap anchor"
         )
+        self._selection_texture = self._create_buffer_texture("atom selection")
 
         self._upload_static_buffers()
         self._allocate_position_buffer()
@@ -1161,17 +1562,22 @@ class MoleculeGLWidget(QOpenGLWidget):
                     self._radius_texture,
                     self._color_texture,
                     self._atom_unwrap_anchor_texture,
+                    self._selection_texture,
                 ):
                     if texture is not None and texture.isCreated():
                         texture.destroy()
                 self._radius_texture = None
                 self._color_texture = None
                 self._atom_unwrap_anchor_texture = None
+                self._selection_texture = None
+                self._pick_fbo = None
+                self._pick_fbo_size = (0, 0)
                 for buffer in (
                     self._quad_vbo,
                     self._radius_vbo,
                     self._color_vbo,
                     self._atom_unwrap_anchor_vbo,
+                    self._selection_vbo,
                     self._bond_data_vbo,
                     self._bond_color_vbo,
                     self._box_vbo,
@@ -1262,7 +1668,16 @@ class MoleculeGLWidget(QOpenGLWidget):
             self._program.setUniformValue(self._loc_atom_radii, 1)
             self._program.setUniformValue(self._loc_atom_colors, 2)
             self._program.setUniformValue(self._loc_atom_anchors, 3)
+            self._program.setUniformValue(self._loc_atom_selection, 4)
+            self._program.setUniformValue(
+                self._loc_has_selection,
+                1 if self._selected_atom_indices.size else 0,
+            )
             self._gl.glUniform1f(self._loc_atom_size_scale, self.effective_atom_size_scale)
+            self._program.setUniformValue(
+                self._loc_selection_color,
+                QVector3D(*self._selection_color),
+            )
             self._set_periodic_uniforms(
                 self._program,
                 has_cell_location=self._loc_has_periodic_cell,
@@ -1275,6 +1690,7 @@ class MoleculeGLWidget(QOpenGLWidget):
                 (1, self._radius_texture),
                 (2, self._color_texture),
                 (3, self._atom_unwrap_anchor_texture),
+                (4, self._selection_texture),
             ):
                 self._gl.glActiveTexture(GL_TEXTURE0 + unit)
                 self._gl.glBindTexture(
@@ -1285,7 +1701,7 @@ class MoleculeGLWidget(QOpenGLWidget):
             self._gl.glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, self._visible_atom_count)
             draw_calls += 1
             self._vao.release()
-            for unit in (3, 2, 1, 0):
+            for unit in (4, 3, 2, 1, 0):
                 self._gl.glActiveTexture(GL_TEXTURE0 + unit)
                 self._gl.glBindTexture(GL_TEXTURE_BUFFER, 0)
             self._program.release()
@@ -1396,6 +1812,8 @@ class MoleculeGLWidget(QOpenGLWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         self._last_mouse_pos = event.position().toPoint()
+        self._mouse_press_pos = self._last_mouse_pos
+        self._mouse_dragged = False
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if self._last_mouse_pos is None:
@@ -1405,10 +1823,306 @@ class MoleculeGLWidget(QOpenGLWidget):
         delta = pos - self._last_mouse_pos
         self._last_mouse_pos = pos
         if event.buttons() & Qt.MouseButton.LeftButton:
+            if delta.manhattanLength() > 0:
+                self._mouse_dragged = True
             self._yaw += float(delta.x()) * 0.35
             self._pitch = max(-89.0, min(89.0, self._pitch + float(delta.y()) * 0.35))
             self._depth_sort_timer.start()
+            self.viewChanged.emit()
             self.update()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        release_pos = event.position().toPoint()
+        press_pos = self._mouse_press_pos
+        clicked = (
+            event.button() == Qt.MouseButton.LeftButton
+            and press_pos is not None
+            and not self._mouse_dragged
+            and (release_pos - press_pos).manhattanLength() <= 4
+        )
+        self._last_mouse_pos = None
+        self._mouse_press_pos = None
+        self._mouse_dragged = False
+        if clicked:
+            result = self.pick_atom(float(event.position().x()), float(event.position().y()))
+            if result is not None:
+                self.atomPicked.emit(result, event.modifiers())
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        result = self.pick_atom(float(event.position().x()), float(event.position().y()))
+        if result is not None:
+            self.atomDoubleClicked.emit(result, event.modifiers())
+
+    def pick_atom(self, logical_x: float, logical_y: float) -> PickResult | None:
+        if (
+            self._atom_count <= 0
+            or self._visible_atom_count <= 0
+            or not self._show_atoms
+            or not self.isValid()
+        ):
+            return None
+        if self._gpu_picking_available:
+            try:
+                return self._pick_atom_gpu(logical_x, logical_y)
+            except Exception as exc:
+                self._gpu_picking_available = False
+                print(f"[picking] GPU ID pass unavailable, using CPU fallback: {exc}", flush=True)
+        return self._pick_atom_cpu(logical_x, logical_y)
+
+    def _pick_atom_gpu(self, logical_x: float, logical_y: float) -> PickResult | None:
+        if self._gl is None or self._pick_program is None:
+            return None
+        x, y, width, height = physical_pick_pixel(
+            logical_x,
+            logical_y,
+            self.width(),
+            self.height(),
+            self.devicePixelRatioF(),
+        )
+        self.makeCurrent()
+        try:
+            if self._frame_upload_pending:
+                self._upload_frame_buffers()
+            position_texture = self._position_texture if self._positions_uploaded else None
+            if position_texture is None:
+                return None
+            self._ensure_pick_fbo(width, height)
+            if self._pick_fbo is None or not self._pick_fbo.bind():
+                raise RuntimeError("Could not bind the integer picking framebuffer")
+            if not self._pick_fbo_integer and self._atom_count > MAX_RGBA8_PICK_ID:
+                raise RuntimeError("RGBA8 picking cannot represent every atom ID")
+
+            self._gl.glViewport(0, 0, width, height)
+            if self._pick_fbo_integer:
+                zero = np.zeros(1, dtype=np.uint32)
+                self._gl.glClearBufferuiv(
+                    GL_COLOR,
+                    0,
+                    VoidPtr(int(zero.ctypes.data), int(zero.nbytes), False),
+                )
+                self._gl.glClear(GL_DEPTH_BUFFER_BIT)
+                pick_program = self._pick_program
+            else:
+                self._gl.glClearColor(0.0, 0.0, 0.0, 0.0)
+                self._gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+                pick_program = self._pick_rgba_program
+            if pick_program is None:
+                raise RuntimeError("Picking shader is unavailable")
+            view, proj = self._camera_matrices()
+            loc_view = pick_program.uniformLocation("u_view")
+            loc_proj = pick_program.uniformLocation("u_proj")
+            loc_positions = pick_program.uniformLocation("u_positions")
+            loc_radii = pick_program.uniformLocation("u_atom_radii")
+            loc_anchors = pick_program.uniformLocation("u_atom_anchors")
+            loc_size = pick_program.uniformLocation("u_atom_size_scale")
+            loc_has_cell = pick_program.uniformLocation("u_has_periodic_cell")
+            loc_cell_vectors = tuple(
+                pick_program.uniformLocation(name)
+                for name in ("u_cell_a", "u_cell_b", "u_cell_c")
+            )
+            loc_inverse_columns = tuple(
+                pick_program.uniformLocation(name)
+                for name in ("u_inv_cell_0", "u_inv_cell_1", "u_inv_cell_2")
+            )
+            pick_program.bind()
+            pick_program.setUniformValue(loc_view, view)
+            pick_program.setUniformValue(loc_proj, proj)
+            pick_program.setUniformValue(loc_positions, 0)
+            pick_program.setUniformValue(loc_radii, 1)
+            pick_program.setUniformValue(loc_anchors, 3)
+            self._gl.glUniform1f(
+                loc_size,
+                self.effective_atom_size_scale,
+            )
+            self._set_periodic_uniforms(
+                pick_program,
+                has_cell_location=loc_has_cell,
+                cell_locations=loc_cell_vectors,
+                inverse_locations=loc_inverse_columns,
+            )
+            for unit, texture in (
+                (0, position_texture),
+                (1, self._radius_texture),
+                (3, self._atom_unwrap_anchor_texture),
+            ):
+                self._gl.glActiveTexture(GL_TEXTURE0 + unit)
+                self._gl.glBindTexture(
+                    GL_TEXTURE_BUFFER,
+                    0 if texture is None else texture.textureId(),
+                )
+            self._vao.bind()
+            self._gl.glDrawArraysInstanced(
+                GL_TRIANGLE_STRIP,
+                0,
+                4,
+                self._visible_atom_count,
+            )
+            self._vao.release()
+            picked = np.zeros(1, dtype=np.uint32)
+            depth = np.ones(1, dtype=np.float32)
+            if self._pick_fbo_integer:
+                self._gl.glReadPixels(
+                    x,
+                    y,
+                    1,
+                    1,
+                    GL_RED_INTEGER,
+                    GL_UNSIGNED_INT,
+                    VoidPtr(int(picked.ctypes.data), int(picked.nbytes), False),
+                )
+            else:
+                rgba = np.zeros(4, dtype=np.uint8)
+                self._gl.glReadPixels(
+                    x,
+                    y,
+                    1,
+                    1,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    VoidPtr(int(rgba.ctypes.data), int(rgba.nbytes), False),
+                )
+                atom_index = decode_pick_id_rgba8(rgba.tolist())
+                picked[0] = 0 if atom_index is None else atom_index + 1
+            self._gl.glReadPixels(
+                x,
+                y,
+                1,
+                1,
+                GL_DEPTH_COMPONENT,
+                GL_FLOAT,
+                VoidPtr(int(depth.ctypes.data), int(depth.nbytes), False),
+            )
+            for unit in (3, 1, 0):
+                self._gl.glActiveTexture(GL_TEXTURE0 + unit)
+                self._gl.glBindTexture(GL_TEXTURE_BUFFER, 0)
+            pick_program.release()
+            if int(picked[0]) == 0:
+                return None
+            atom_index = int(picked[0]) - 1
+            if atom_index < 0 or atom_index >= self._atom_count:
+                raise RuntimeError(f"Picking shader returned invalid atom ID {atom_index}")
+            return PickResult(
+                atom_index=atom_index,
+                depth=float(depth[0]),
+                frame_revision=self._frame_revision,
+                backend="gpu",
+            )
+        finally:
+            if self._pick_fbo is not None:
+                self._pick_fbo.release()
+            self._gl.glBindFramebuffer(GL_FRAMEBUFFER, self.defaultFramebufferObject())
+            self._set_physical_viewport()
+            self.doneCurrent()
+
+    def _ensure_pick_fbo(self, width: int, height: int) -> None:
+        requested = (int(width), int(height))
+        if (
+            self._pick_fbo is not None
+            and self._pick_fbo_size == requested
+            and self._pick_fbo.isValid()
+        ):
+            return
+        framebuffer = self._create_pick_fbo(requested, GL_R32UI)
+        integer_ready = framebuffer.isValid() and framebuffer.bind()
+        if integer_ready:
+            framebuffer.release()
+            self._pick_fbo_integer = True
+        else:
+            while self._gl.glGetError() != 0:
+                pass
+            framebuffer = self._create_pick_fbo(requested, GL_RGBA8)
+            if not framebuffer.isValid() or not framebuffer.bind():
+                raise RuntimeError("OpenGL driver rejected both R32UI and RGBA8 picking buffers")
+            framebuffer.release()
+            self._pick_fbo_integer = False
+        self._pick_fbo = framebuffer
+        self._pick_fbo_size = requested
+
+    @staticmethod
+    def _create_pick_fbo(
+        requested: tuple[int, int],
+        internal_format: int,
+    ) -> QOpenGLFramebufferObject:
+        framebuffer_format = QOpenGLFramebufferObjectFormat()
+        framebuffer_format.setAttachment(QOpenGLFramebufferObject.Attachment.Depth)
+        framebuffer_format.setInternalTextureFormat(internal_format)
+        framebuffer_format.setSamples(0)
+        return QOpenGLFramebufferObject(
+            QSize(requested[0], requested[1]),
+            framebuffer_format,
+        )
+
+    def _pick_atom_cpu(self, logical_x: float, logical_y: float) -> PickResult | None:
+        x, y, width, height = physical_pick_pixel(
+            logical_x,
+            logical_y,
+            self.width(),
+            self.height(),
+            self.devicePixelRatioF(),
+        )
+        ndc_x = 2.0 * (x + 0.5) / width - 1.0
+        ndc_y = 2.0 * (y + 0.5) / height - 1.0
+        view, projection = self._camera_matrices()
+        inverse, invertible = (projection * view).inverted()
+        if not invertible:
+            return None
+        near = inverse.map(QVector4D(ndc_x, ndc_y, -1.0, 1.0))
+        far = inverse.map(QVector4D(ndc_x, ndc_y, 1.0, 1.0))
+        if abs(near.w()) <= 1.0e-12 or abs(far.w()) <= 1.0e-12:
+            return None
+        origin = np.array(
+            [near.x() / near.w(), near.y() / near.w(), near.z() / near.w()],
+            dtype=np.float64,
+        )
+        far_point = np.array(
+            [far.x() / far.w(), far.y() / far.w(), far.z() / far.w()],
+            dtype=np.float64,
+        )
+        direction = far_point - origin
+        direction_norm = float(np.linalg.norm(direction))
+        if direction_norm <= 1.0e-12:
+            return None
+        direction /= direction_norm
+        best_atom = -1
+        best_distance = math.inf
+        chunk_size = 131_072
+        for start in range(0, self._visible_atom_count, chunk_size):
+            indices = self._visible_atom_indices[start : start + chunk_size]
+            centers = np.asarray(self._display_positions(indices), dtype=np.float64)
+            radii = (
+                np.asarray(self._radii[indices], dtype=np.float64)
+                * self.effective_atom_size_scale
+            )
+            center_delta = centers - origin
+            projected = center_delta @ direction
+            perpendicular2 = np.einsum(
+                "ij,ij->i",
+                center_delta,
+                center_delta,
+            ) - projected * projected
+            radius2 = radii * radii
+            hits = perpendicular2 <= radius2
+            if not np.any(hits):
+                continue
+            half_chord = np.sqrt(np.maximum(0.0, radius2 - perpendicular2))
+            near_hit = projected - half_chord
+            far_hit = projected + half_chord
+            distances = np.where(near_hit >= 0.0, near_hit, far_hit)
+            distances[~hits | (distances < 0.0)] = np.inf
+            local = int(np.argmin(distances))
+            if float(distances[local]) < best_distance:
+                best_distance = float(distances[local])
+                best_atom = int(indices[local])
+        if best_atom < 0:
+            return None
+        return PickResult(
+            atom_index=best_atom,
+            depth=best_distance,
+            frame_revision=self._frame_revision,
+            backend="cpu",
+        )
 
     def _refresh_depth_order_after_interaction(self) -> None:
         self._depth_order_dirty = True
@@ -1420,18 +2134,21 @@ class MoleculeGLWidget(QOpenGLWidget):
 
         self._yaw += float(yaw_delta)
         self._depth_sort_timer.start()
+        self.viewChanged.emit()
         self.update()
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
         steps = event.angleDelta().y() / 120.0
         self._distance *= math.pow(0.88, steps)
         self._distance = max(self._scene_radius * 0.6, min(self._scene_radius * 50.0, self._distance))
+        self.viewChanged.emit()
         self.update()
 
     def _upload_static_buffers(self) -> None:
         self._prepare_atom_permutation_buffers()
         self._upload_atom_permutation_buffer()
         self._upload_canonical_atom_buffers()
+        self._upload_selection_buffer()
 
     def _prepare_atom_permutation_buffers(self) -> None:
         required_bytes = max(4, int(self._visible_atom_indices_gpu.nbytes))
@@ -1496,6 +2213,15 @@ class MoleculeGLWidget(QOpenGLWidget):
             anchor_indices,
             GL_R32F,
             empty_bytes=4,
+        )
+
+    def _upload_selection_buffer(self) -> None:
+        self._upload_atom_texture_buffer(
+            self._selection_vbo,
+            self._selection_texture,
+            self._selection_flags,
+            GL_R8UI,
+            empty_bytes=1,
         )
 
     def _upload_atom_texture_buffer(

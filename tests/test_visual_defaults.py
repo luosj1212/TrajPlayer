@@ -169,7 +169,7 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn("unwrap_group_ids=unwrap_group_ids", source)
         self.assertNotIn("self.filter_mode_combo", source)
         self.assertNotIn("self.filter_value_spin", source)
-        self.assertNotIn("QSpinBox", source)
+        self.assertNotIn("self.filter_value_spin = QSpinBox", source)
         self.assertIn("def apply_visibility_filter(self) -> None:", source)
         self.assertIn("self.gl_view.set_visible_atoms", source)
         self.assertIn("connected_components", WORKER_SOURCE)
