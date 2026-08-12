@@ -5,6 +5,17 @@ All notable changes to TrajPlayer are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.0-alpha.11] - 2026-08-12
+
+### Changed
+
+- Density-over-time and density-profile analyses now always use the entire
+  system, independent of the current atom selection
+- Split the responsive Inspector into View, Inspect, and Analysis tabs so all
+  analysis parameters and actions remain visible at supported window sizes
+- Clarified whole-system and current-selection analysis scope in both Chinese
+  and English interfaces
+
 ## [0.1.0-alpha.10] - 2026-08-12
 
 ### Added
@@ -214,7 +225,8 @@ All notable changes to TrajPlayer are documented here. The project follows
 - Windows x64 and Linux x86_64 portable packaging
 - Cross-platform tests, CI, release automation, and dependency license collection
 
-[Unreleased]: https://github.com/luosj1212/TrajPlayer/compare/v0.1.0-alpha.10...HEAD
+[Unreleased]: https://github.com/luosj1212/TrajPlayer/compare/v0.1.0-alpha.11...HEAD
+[0.1.0-alpha.11]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.11
 [0.1.0-alpha.10]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.10
 [0.1.0-alpha.9]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.9
 [0.1.0-alpha.8]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.8

@@ -22,7 +22,8 @@ analysis generation.
 
 Number density is `N / V` in `1/A3`. Mass density uses atomic masses from ASE
 and converts `amu/A3` to `g/cm3`. A valid cell is required for every sampled
-frame.
+frame. Bulk density and density profiles always use every atom in the system;
+an active viewport selection does not change their scope.
 
 Density profiles map positions to fractional cell coordinates before binning
 along X, Y, or Z. This keeps periodic binning meaningful for triclinic cells.

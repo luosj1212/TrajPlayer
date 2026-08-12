@@ -14,12 +14,14 @@ from .pbc import (
     minimum_image_displacement,
 )
 from .rms import rmsd_series, rmsf
+from .runner import analysis_uses_entire_system
 from .scheduler import AnalysisScheduler
 
 __all__ = [
     "AMU_PER_ANGSTROM3_TO_G_CM3",
     "AnalysisScheduler",
     "align_positions",
+    "analysis_uses_entire_system",
     "angle",
     "bounded_fft_atom_chunk",
     "bulk_density",

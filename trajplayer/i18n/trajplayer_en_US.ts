@@ -112,7 +112,11 @@
     </message>
     <message>
       <source>analysis_scope</source>
-      <translation>Atoms</translation>
+      <translation>Scope</translation>
+    </message>
+    <message>
+      <source>analysis_scope_tooltip</source>
+      <translation>Analyze the entire system or the current atom selection</translation>
     </message>
     <message>
       <source>analysis_stride</source>
@@ -249,6 +253,10 @@
     <message>
       <source>density_profile_name</source>
       <translation>Density profile over time</translation>
+    </message>
+    <message>
+      <source>density_system_scope</source>
+      <translation>Density is always calculated for the entire system</translation>
     </message>
     <message>
       <source>dihedral_name</source>
@@ -393,6 +401,10 @@
     <message>
       <source>inferring_bonds</source>
       <translation>Inferring bonds in the background</translation>
+    </message>
+    <message>
+      <source>inspect_tab</source>
+      <translation>Inspect</translation>
     </message>
     <message>
       <source>inspector</source>
@@ -640,7 +652,7 @@
     </message>
     <message>
       <source>scope_all</source>
-      <translation>All atoms</translation>
+      <translation>Entire system</translation>
     </message>
     <message>
       <source>scope_selection</source>
@@ -741,6 +753,10 @@
     <message>
       <source>trajectory_info</source>
       <translation>{frames} frames, {atoms} atoms, {bonds} bonds, {cache}, {disk}, {mode} GPU instancing</translation>
+    </message>
+    <message>
+      <source>view_tab</source>
+      <translation>View</translation>
     </message>
     <message>
       <source>visibility</source>

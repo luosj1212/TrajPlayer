@@ -28,3 +28,4 @@ def test_dark_stylesheet_has_dark_semantic_backgrounds() -> None:
     assert DARK_PALETTE.window_bg in stylesheet
     assert DARK_PALETTE.panel_bg in stylesheet
     assert DARK_PALETTE.text in stylesheet
+    assert "QTabWidget#inspectorTabs" in stylesheet

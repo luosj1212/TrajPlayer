@@ -82,7 +82,7 @@ def test_runner_density_rmsd_com_and_measurement() -> None:
 
     density = run(store, request("number_density", 3, 2, mass_density=False))
     np.testing.assert_allclose(density.y, 0.002)
-    assert density.metadata["selection_scope"] == "selection"
+    assert density.metadata["selection_scope"] == "all"
     all_atoms = run(
         store,
         AnalysisRequest(
@@ -98,6 +98,23 @@ def test_runner_density_rmsd_com_and_measurement() -> None:
         ),
     )
     assert all_atoms.metadata["selection_scope"] == "all"
+
+    subset_density = run(
+        store,
+        AnalysisRequest(
+            kind="number_density",
+            source_frames=(0, 3, 1),
+            selection=SelectionSnapshot(
+                atom_indices=np.array([0], dtype=np.uint32),
+                primary_atom=0,
+                revision=4,
+                trajectory_generation=7,
+            ),
+            parameters={"mass_density": False},
+        ),
+    )
+    np.testing.assert_allclose(subset_density.y, 0.002)
+    assert subset_density.metadata["selection_scope"] == "all"
 
     fitted = run(store, request("rmsd", 3, 2, fit=True))
     np.testing.assert_allclose(fitted.y, 0.0, atol=1e-12)

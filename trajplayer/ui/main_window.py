@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QLayout,
     QMainWindow,
     QMenu,
     QPushButton,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QStackedLayout,
     QStatusBar,
     QStyle,
+    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -115,9 +117,19 @@ UI_TEXT = {
     "range_start": {"en": "Start", "zh": "起点"},
     "range_end": {"en": "End", "zh": "终点"},
     "analysis": {"en": "Analysis", "zh": "分析"},
-    "analysis_scope": {"en": "Atoms", "zh": "原子范围"},
-    "scope_all": {"en": "All atoms", "zh": "全部原子"},
+    "view_tab": {"en": "View", "zh": "查看"},
+    "inspect_tab": {"en": "Inspect", "zh": "检查"},
+    "analysis_scope": {"en": "Scope", "zh": "范围"},
+    "scope_all": {"en": "Entire system", "zh": "整个体系"},
     "scope_selection": {"en": "Current selection", "zh": "当前选择"},
+    "analysis_scope_tooltip": {
+        "en": "Analyze the entire system or the current atom selection",
+        "zh": "分析整个体系，或仅分析当前选择的原子",
+    },
+    "density_system_scope": {
+        "en": "Density is always calculated for the entire system",
+        "zh": "密度始终按整个体系计算",
+    },
     "analysis_stride": {"en": "Stride", "zh": "步长"},
     "timestep": {"en": "Timestep", "zh": "帧间隔"},
     "timestep_unknown": {"en": "Unknown", "zh": "未知"},
@@ -706,14 +718,7 @@ class MainWindowView(QMainWindow):
 
         top_bar = self._build_top_bar()
         self.inspector_panel = self._build_inspector()
-        self.inspector_scroll = QScrollArea()
-        self.inspector_scroll.setObjectName("inspectorScroll")
-        self.inspector_scroll.setWidgetResizable(True)
-        self.inspector_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.inspector_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        self.inspector_scroll.setWidget(self.inspector_panel)
+        self.inspector_scroll = self.inspector_panel
         self.inspector_scroll.setMinimumWidth(280)
         self.inspector_scroll.setMaximumWidth(360)
 
@@ -782,81 +787,131 @@ class MainWindowView(QMainWindow):
         top_layout.addWidget(self.inspector_toggle_button)
         return top_bar
 
-    def _build_inspector(self) -> QFrame:
+    def _inspector_page(self):
         panel = QFrame()
         panel.setObjectName("inspectorPanel")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(16, 14, 16, 16)
         layout.setSpacing(8)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("inspectorScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(panel)
+        return scroll, layout
+
+    def _build_inspector(self) -> QTabWidget:
+        tabs = QTabWidget()
+        tabs.setObjectName("inspectorTabs")
+        tabs.setDocumentMode(True)
+        tabs.tabBar().setExpanding(True)
+        tabs.tabBar().setUsesScrollButtons(False)
+
+        view_page, view_layout = self._inspector_page()
+        inspect_page, inspect_layout = self._inspector_page()
+        analysis_page, analysis_layout = self._inspector_page()
 
         self.display_section_label = self._section_label()
-        layout.addWidget(self.display_section_label)
-        layout.addWidget(self.render_mode_label)
-        layout.addWidget(self.render_mode_combo)
-        layout.addLayout(
+        view_layout.addWidget(self.display_section_label)
+        view_layout.addWidget(self.render_mode_label)
+        view_layout.addWidget(self.render_mode_combo)
+        view_layout.addLayout(
             self._slider_row(
                 self.atom_size_label,
                 self.atom_size_slider,
                 self.atom_size_value_label,
             )
         )
-        layout.addLayout(
+        view_layout.addLayout(
             self._slider_row(
                 self.bond_size_label,
                 self.bond_size_slider,
                 self.bond_size_value_label,
             )
         )
-        layout.addWidget(self.box_check)
-        layout.addSpacing(10)
+        view_layout.addWidget(self.box_check)
+        view_layout.addSpacing(10)
 
         self.visibility_section_label = self._section_label()
-        layout.addWidget(self.visibility_section_label)
-        layout.addWidget(self.filter_mode_segment)
+        view_layout.addWidget(self.visibility_section_label)
+        view_layout.addWidget(self.filter_mode_segment)
         filter_value_layout = QHBoxLayout()
         filter_value_layout.setContentsMargins(0, 0, 0, 0)
         filter_value_layout.setSpacing(8)
         filter_value_layout.addWidget(self.filter_value_slider, stretch=1)
         filter_value_layout.addWidget(self.filter_value_label)
         filter_value_layout.addWidget(self.chain_selection_edit, stretch=1)
-        layout.addLayout(filter_value_layout)
-        layout.addSpacing(10)
+        view_layout.addLayout(filter_value_layout)
+        view_layout.addSpacing(10)
+
+        self.playback_section_label = self._section_label()
+        view_layout.addWidget(self.playback_section_label)
+        view_layout.addLayout(
+            self._slider_row(
+                self.playback_speed_label,
+                self.playback_speed_slider,
+                self.playback_speed_value_label,
+            )
+        )
+        view_layout.addSpacing(8)
+        view_layout.addWidget(self.advanced_toggle)
+        view_layout.addWidget(self.advanced_content)
+        view_layout.addSpacing(10)
+
+        self.interface_section_label = self._section_label()
+        view_layout.addWidget(self.interface_section_label)
+        language_layout = QHBoxLayout()
+        language_layout.setContentsMargins(0, 0, 0, 0)
+        language_layout.setSpacing(8)
+        language_layout.addWidget(self.language_label)
+        language_layout.addWidget(self.language_combo, stretch=1)
+        view_layout.addLayout(language_layout)
+        theme_layout = QHBoxLayout()
+        theme_layout.setContentsMargins(0, 0, 0, 0)
+        theme_layout.setSpacing(8)
+        theme_layout.addWidget(self.theme_label)
+        theme_layout.addWidget(self.theme_combo, stretch=1)
+        view_layout.addLayout(theme_layout)
+        view_layout.addStretch(1)
 
         self.selection_section_label = self._section_label()
-        layout.addWidget(self.selection_section_label)
-        layout.addWidget(self.selection_summary_label)
+        inspect_layout.addWidget(self.selection_section_label)
+        inspect_layout.addWidget(self.selection_summary_label)
         selection_actions = QHBoxLayout()
         selection_actions.setContentsMargins(0, 0, 0, 0)
         selection_actions.setSpacing(8)
         selection_actions.addWidget(self.clear_selection_button)
         selection_actions.addWidget(self.focus_selection_button)
-        layout.addLayout(selection_actions)
-        layout.addSpacing(10)
+        inspect_layout.addLayout(selection_actions)
+        inspect_layout.addSpacing(10)
 
         self.measurement_section_label = self._section_label()
-        layout.addWidget(self.measurement_section_label)
-        layout.addWidget(self.measurement_draft_label)
-        layout.addWidget(self.measurement_pbc_check)
+        inspect_layout.addWidget(self.measurement_section_label)
+        inspect_layout.addWidget(self.measurement_draft_label)
+        inspect_layout.addWidget(self.measurement_pbc_check)
         measurement_actions = QHBoxLayout()
         measurement_actions.setContentsMargins(0, 0, 0, 0)
         measurement_actions.setSpacing(8)
         measurement_actions.addWidget(self.pin_measurement_button)
         measurement_actions.addWidget(self.analyze_measurement_button)
-        layout.addLayout(measurement_actions)
-        layout.addWidget(self.measurement_combo)
-        layout.addWidget(self.remove_measurement_button)
-        layout.addSpacing(10)
+        inspect_layout.addLayout(measurement_actions)
+        inspect_layout.addWidget(self.measurement_combo)
+        inspect_layout.addWidget(self.remove_measurement_button)
+        inspect_layout.addSpacing(10)
 
         self.timeline_section_label = self._section_label()
-        layout.addWidget(self.timeline_section_label)
+        inspect_layout.addWidget(self.timeline_section_label)
         marker_actions = QHBoxLayout()
         marker_actions.setContentsMargins(0, 0, 0, 0)
         marker_actions.setSpacing(8)
         marker_actions.addWidget(self.add_marker_button)
         marker_actions.addWidget(self.remove_marker_button)
-        layout.addLayout(marker_actions)
-        layout.addWidget(self.marker_combo)
-        layout.addWidget(self.timeline_range_check)
+        inspect_layout.addLayout(marker_actions)
+        inspect_layout.addWidget(self.marker_combo)
+        inspect_layout.addWidget(self.timeline_range_check)
         range_layout = QHBoxLayout()
         range_layout.setContentsMargins(0, 0, 0, 0)
         range_layout.setSpacing(6)
@@ -864,34 +919,34 @@ class MainWindowView(QMainWindow):
         range_layout.addWidget(self.range_start_spin)
         range_layout.addWidget(self.range_end_label)
         range_layout.addWidget(self.range_end_spin)
-        layout.addLayout(range_layout)
-        layout.addSpacing(10)
+        inspect_layout.addLayout(range_layout)
+        inspect_layout.addStretch(1)
 
         self.analysis_section_label = self._section_label()
-        layout.addWidget(self.analysis_section_label)
-        layout.addWidget(self.analysis_kind_combo)
+        self.analysis_section_label.hide()
+        analysis_layout.addWidget(self.analysis_kind_combo)
         analysis_scope_layout = QHBoxLayout()
         analysis_scope_layout.setContentsMargins(0, 0, 0, 0)
         analysis_scope_layout.setSpacing(8)
         analysis_scope_layout.addWidget(self.analysis_scope_label)
         analysis_scope_layout.addWidget(self.analysis_scope_combo, stretch=1)
-        layout.addLayout(analysis_scope_layout)
+        analysis_layout.addLayout(analysis_scope_layout)
         analysis_stride_layout = QHBoxLayout()
         analysis_stride_layout.setContentsMargins(0, 0, 0, 0)
         analysis_stride_layout.setSpacing(8)
         analysis_stride_layout.addWidget(self.analysis_stride_label)
         analysis_stride_layout.addWidget(self.analysis_stride_spin, stretch=1)
-        layout.addLayout(analysis_stride_layout)
+        analysis_layout.addLayout(analysis_stride_layout)
         timestep_layout = QHBoxLayout()
         timestep_layout.setContentsMargins(0, 0, 0, 0)
         timestep_layout.setSpacing(8)
         timestep_layout.addWidget(self.timestep_label)
         timestep_layout.addWidget(self.timestep_spin, stretch=1)
         timestep_layout.addWidget(self.time_unit_combo)
-        layout.addLayout(timestep_layout)
-        layout.addWidget(self.analysis_pbc_check)
-        layout.addWidget(self.analysis_fit_check)
-        layout.addWidget(self.analysis_mass_check)
+        analysis_layout.addLayout(timestep_layout)
+        analysis_layout.addWidget(self.analysis_pbc_check)
+        analysis_layout.addWidget(self.analysis_fit_check)
+        analysis_layout.addWidget(self.analysis_mass_check)
         direction_layout = QHBoxLayout()
         direction_layout.setContentsMargins(0, 0, 0, 0)
         direction_layout.setSpacing(6)
@@ -899,14 +954,14 @@ class MainWindowView(QMainWindow):
         direction_layout.addWidget(self.analysis_dimensions_combo)
         direction_layout.addWidget(self.analysis_axis_label)
         direction_layout.addWidget(self.analysis_axis_combo)
-        layout.addLayout(direction_layout)
+        analysis_layout.addLayout(direction_layout)
         msd_layout = QHBoxLayout()
         msd_layout.setContentsMargins(0, 0, 0, 0)
         msd_layout.setSpacing(8)
         msd_layout.addWidget(self.analysis_max_lag_label)
         msd_layout.addWidget(self.analysis_max_lag_spin, stretch=1)
-        layout.addLayout(msd_layout)
-        layout.addWidget(self.analysis_remove_drift_check)
+        analysis_layout.addLayout(msd_layout)
+        analysis_layout.addWidget(self.analysis_remove_drift_check)
         numeric_layout = QHBoxLayout()
         numeric_layout.setContentsMargins(0, 0, 0, 0)
         numeric_layout.setSpacing(6)
@@ -914,46 +969,21 @@ class MainWindowView(QMainWindow):
         numeric_layout.addWidget(self.analysis_bins_spin)
         numeric_layout.addWidget(self.reference_frame_label)
         numeric_layout.addWidget(self.reference_frame_spin)
-        layout.addLayout(numeric_layout)
-        layout.addWidget(self.analysis_warning_label)
+        analysis_layout.addLayout(numeric_layout)
+        analysis_layout.addWidget(self.analysis_warning_label)
         analysis_actions = QHBoxLayout()
         analysis_actions.setContentsMargins(0, 0, 0, 0)
         analysis_actions.setSpacing(8)
         analysis_actions.addWidget(self.run_analysis_button)
         analysis_actions.addWidget(self.cancel_analysis_button)
-        layout.addLayout(analysis_actions)
-        layout.addSpacing(10)
+        analysis_layout.addLayout(analysis_actions)
+        analysis_layout.addStretch(1)
 
-        self.playback_section_label = self._section_label()
-        layout.addWidget(self.playback_section_label)
-        layout.addLayout(
-            self._slider_row(
-                self.playback_speed_label,
-                self.playback_speed_slider,
-                self.playback_speed_value_label,
-            )
-        )
-        layout.addSpacing(8)
-        layout.addWidget(self.advanced_toggle)
-        layout.addWidget(self.advanced_content)
-        layout.addSpacing(10)
-
-        self.interface_section_label = self._section_label()
-        layout.addWidget(self.interface_section_label)
-        language_layout = QHBoxLayout()
-        language_layout.setContentsMargins(0, 0, 0, 0)
-        language_layout.setSpacing(8)
-        language_layout.addWidget(self.language_label)
-        language_layout.addWidget(self.language_combo, stretch=1)
-        layout.addLayout(language_layout)
-        theme_layout = QHBoxLayout()
-        theme_layout.setContentsMargins(0, 0, 0, 0)
-        theme_layout.setSpacing(8)
-        theme_layout.addWidget(self.theme_label)
-        theme_layout.addWidget(self.theme_combo, stretch=1)
-        layout.addLayout(theme_layout)
-        layout.addStretch(1)
-        return panel
+        self.inspector_view_tab = tabs.addTab(view_page, "")
+        self.inspector_inspect_tab = tabs.addTab(inspect_page, "")
+        self.inspector_analysis_tab = tabs.addTab(analysis_page, "")
+        self.inspector_tabs = tabs
+        return tabs
 
     def _build_analysis_panel(self) -> QFrame:
         panel = QFrame()
@@ -1084,6 +1114,15 @@ class MainWindowView(QMainWindow):
         self.analysis_section_label.setText(self._t("analysis"))
         self.playback_section_label.setText(self._t("playback"))
         self.interface_section_label.setText(self._t("interface"))
+        self.inspector_tabs.setTabText(self.inspector_view_tab, self._t("view_tab"))
+        self.inspector_tabs.setTabText(
+            self.inspector_inspect_tab,
+            self._t("inspect_tab"),
+        )
+        self.inspector_tabs.setTabText(
+            self.inspector_analysis_tab,
+            self._t("analysis"),
+        )
         self.advanced_toggle.setText(self._t("advanced"))
         self.render_mode_label.setText(self._t("representation"))
         for key, data in (("ball_stick", "ball_stick"), ("ball", "ball"), ("bond", "bond")):
@@ -1157,6 +1196,13 @@ class MainWindowView(QMainWindow):
             self.analysis_kind_combo.setItemText(index, self._t(f"{kind}_name"))
         self.analysis_scope_combo.setItemText(self.analysis_scope_combo.findData("all"), self._t("scope_all"))
         self.analysis_scope_combo.setItemText(self.analysis_scope_combo.findData("selection"), self._t("scope_selection"))
+        self.analysis_scope_combo.setToolTip(
+            self._t(
+                "density_system_scope"
+                if analysis_kind in {"density", "density_profile"}
+                else "analysis_scope_tooltip"
+            )
+        )
         self.run_analysis_button.setText(self._t("run_analysis"))
         self.cancel_analysis_button.setText(self._t("cancel_analysis"))
         self.export_analysis_button.setText(self._t("export_csv"))

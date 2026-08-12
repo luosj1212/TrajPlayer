@@ -49,7 +49,37 @@ QScrollArea#inspectorScroll, QScrollArea#inspectorScroll > QWidget > QWidget {
 }
 QFrame#inspectorPanel {
     background: #ffffff;
+    border: 0;
+}
+QTabWidget#inspectorTabs {
+    background: #ffffff;
     border-left: 1px solid #dfe3e8;
+}
+QTabWidget#inspectorTabs::pane {
+    border: 0;
+    border-top: 1px solid #dfe3e8;
+    background: #ffffff;
+}
+QTabWidget#inspectorTabs QTabBar::tab {
+    min-height: 32px;
+    background: #eef2f6;
+    color: #59636f;
+    border: 0;
+    border-right: 1px solid #dfe3e8;
+    padding: 0 8px;
+}
+QTabWidget#inspectorTabs QTabBar::tab:last {
+    border-right: 0;
+}
+QTabWidget#inspectorTabs QTabBar::tab:selected {
+    background: #ffffff;
+    color: #1769aa;
+    border-bottom: 2px solid #1769aa;
+    font-weight: 600;
+}
+QTabWidget#inspectorTabs QTabBar::tab:hover:!selected {
+    background: #e2e9f0;
+    color: #20242a;
 }
 QLabel#fileLabel {
     color: #20242a;

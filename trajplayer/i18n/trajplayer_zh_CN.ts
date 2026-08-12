@@ -112,7 +112,11 @@
     </message>
     <message>
       <source>analysis_scope</source>
-      <translation>原子范围</translation>
+      <translation>范围</translation>
+    </message>
+    <message>
+      <source>analysis_scope_tooltip</source>
+      <translation>分析整个体系，或仅分析当前选择的原子</translation>
     </message>
     <message>
       <source>analysis_stride</source>
@@ -249,6 +253,10 @@
     <message>
       <source>density_profile_name</source>
       <translation>密度剖面随时间</translation>
+    </message>
+    <message>
+      <source>density_system_scope</source>
+      <translation>密度始终按整个体系计算</translation>
     </message>
     <message>
       <source>dihedral_name</source>
@@ -393,6 +401,10 @@
     <message>
       <source>inferring_bonds</source>
       <translation>正在后台推断化学键</translation>
+    </message>
+    <message>
+      <source>inspect_tab</source>
+      <translation>检查</translation>
     </message>
     <message>
       <source>inspector</source>
@@ -640,7 +652,7 @@
     </message>
     <message>
       <source>scope_all</source>
-      <translation>全部原子</translation>
+      <translation>整个体系</translation>
     </message>
     <message>
       <source>scope_selection</source>
@@ -741,6 +753,10 @@
     <message>
       <source>trajectory_info</source>
       <translation>{frames} 帧，{atoms} 个原子，{bonds} 条键，{cache}，{disk}，{mode} GPU 实例化</translation>
+    </message>
+    <message>
+      <source>view_tab</source>
+      <translation>查看</translation>
     </message>
     <message>
       <source>visibility</source>

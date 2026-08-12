@@ -30,6 +30,15 @@ class AnalysisCancelled(RuntimeError):
     pass
 
 
+SYSTEM_WIDE_ANALYSES = frozenset(
+    {"density", "number_density", "mass_density", "density_profile"}
+)
+
+
+def analysis_uses_entire_system(kind: str) -> bool:
+    return str(kind).strip().lower() in SYSTEM_WIDE_ANALYSES
+
+
 class AnalysisFrameProvider:
     """One reusable full-frame slab for a serialized analysis scan."""
 
@@ -92,16 +101,15 @@ def run_analysis(
     frames = np.arange(start, stop, stride, dtype=np.int64)
     if frames.size == 0:
         raise ValueError("The selected analysis range contains no available frames")
+    kind = request.kind
     selected = request.selection.atom_indices.astype(np.int64, copy=False)
-    if selected.size == 0:
+    if analysis_uses_entire_system(kind) or selected.size == 0:
         selected = np.arange(store.atom_count, dtype=np.int64)
     if int(selected.max()) >= store.atom_count:
         raise IndexError("Analysis selection is outside the current trajectory")
     provider = AnalysisFrameProvider(store, selected, cancel_event, playback_event)
     numbers = np.asarray(atom_numbers, dtype=np.int64)[selected]
     progress = _Progress(int(frames.size), progress_callback)
-    kind = request.kind
-
     if kind in {"density", "number_density", "mass_density"}:
         mass_mode = kind != "number_density" and bool(request.parameters.get("mass_density", True))
         masses = _atomic_masses(numbers) if mass_mode else None
@@ -432,7 +440,10 @@ def _result(request, x, y, *, y_unit: str, metadata: dict[str, object]) -> Analy
     x_values = np.asarray(x, dtype=np.float64)
     result_metadata = dict(metadata)
     result_metadata["selection_scope"] = (
-        "all" if request.selection.atom_indices.size == 0 else "selection"
+        "all"
+        if analysis_uses_entire_system(request.kind)
+        or request.selection.atom_indices.size == 0
+        else "selection"
     )
     x_kind = str(result_metadata.get("x_kind", "frame"))
     x_unit = "atom" if x_kind == "atom" else "frame"

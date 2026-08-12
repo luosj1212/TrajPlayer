@@ -178,7 +178,10 @@ class VisualDefaultTests(unittest.TestCase):
         source = UI_SOURCE
 
         self.assertIn("self.content_splitter = QSplitter", source)
-        self.assertIn('self.inspector_scroll.setObjectName("inspectorScroll")', source)
+        self.assertIn('tabs.setObjectName("inspectorTabs")', source)
+        self.assertIn('scroll.setObjectName("inspectorScroll")', source)
+        self.assertIn("self.inspector_view_tab = tabs.addTab", source)
+        self.assertIn("self.inspector_analysis_tab = tabs.addTab", source)
         self.assertIn("RESPONSIVE_INSPECTOR_WIDTH = 920", source)
         self.assertIn("def resizeEvent", source)
         self.assertIn("self.language_combo.addItem(\"中文\", \"zh\")", source)

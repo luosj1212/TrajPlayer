@@ -57,11 +57,13 @@ continue in the specialized tools users already prefer.
   viewport annotations and time-series analysis
 - Marker and playback-range timeline linked to a built-in line/heatmap plot
 - Cancellable background density, density profile, MSD, RMSD, RMSF, center of
-  mass, radius of gyration, and pinned-measurement analysis
+  mass, radius of gyration, and pinned-measurement analysis; density and density
+  profiles always use the entire system
 - Recent trajectory sources, Light/Dark/System themes, Qt Chinese/English
   translations, current-frame export, screenshots, and CSV/plot export
 - Explicit bond-source status with optional static frame-1 inference
-- Responsive inspector layout with runtime Chinese and English interfaces
+- Responsive View, Inspect, and Analysis inspector tabs with runtime Chinese
+  and English interfaces
 - Portable Windows x64, Linux x86_64, and macOS Apple Silicon/Intel packages
 - Lightweight Chemfiles structure/Gromacs backend and optional native `trajcore`
   hot paths; portable builds do not bundle SciPy or MDAnalysis
@@ -75,7 +77,7 @@ are different from the source archive offered by **Code > Download ZIP**.
 ### Windows Portable Package
 
 1. Open GitHub Releases and download
-   `TrajPlayer-Windows-x64-v0.1.0-alpha.10.zip`, not the source-code ZIP.
+   `TrajPlayer-Windows-x64-v0.1.0-alpha.11.zip`, not the source-code ZIP.
 2. Extract the archive completely.
 3. Run `TrajPlayer\TrajPlayer.exe` from the extracted directory.
 4. Use **Open** or drag trajectory files into the application window.
@@ -100,7 +102,7 @@ extracted `TrajPlayer` folder and run:
 
 ### Linux Portable Package
 
-Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.10.tar.gz` from GitHub Releases
+Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.11.tar.gz` from GitHub Releases
 and extract the complete archive. Python is not required. Then run:
 
 ```bash
@@ -118,8 +120,8 @@ Generate the same report with
 Download the ZIP that matches the Mac:
 
 - Apple Silicon (M1 or newer):
-  `TrajPlayer-macOS-arm64-v0.1.0-alpha.10.zip`
-- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.10.zip`
+  `TrajPlayer-macOS-arm64-v0.1.0-alpha.11.zip`
+- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.11.zip`
 
 Extract the complete ZIP, then open `TrajPlayer-macOS/TrajPlayer.app`. Python
 and Conda are not required. The app can be moved to `/Applications` as a whole;

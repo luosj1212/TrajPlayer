@@ -1,4 +1,4 @@
-TrajPlayer v0.1.0-alpha.10 distribution
+TrajPlayer v0.1.0-alpha.11 distribution
 
 Windows
 1. Extract the entire TrajPlayer folder from the zip archive.
@@ -56,7 +56,7 @@ Interaction and analysis
 - Click atoms to select them. Shift adds, Ctrl/Cmd toggles, Esc clears, and F focuses the current selection.
 - Select two, three, or four atoms to measure a distance, angle, or dihedral. Periodic minimum-image geometry supports triclinic cells.
 - The timeline supports markers and an optional playback range. Analysis curves can seek the viewer when their horizontal axis represents trajectory frames.
-- Density, density profile, MSD, RMSD, RMSF, center of mass, radius of gyration, and pinned-measurement time series run in a cancellable background task.
+- Density, density profile, MSD, RMSD, RMSF, center of mass, radius of gyration, and pinned-measurement time series run in a cancellable background task. Density and density profiles always use the entire system.
 - Export the current frame as XYZ/extXYZ, the current viewport or analysis plot as PNG, and complete analysis values as CSV.
 - Physical time is shown only after a timestep is supplied. Periodic MSD requires continuous no-jump coordinates; TrajPlayer attempts frame-by-frame unwrapping when cell data is available.
 

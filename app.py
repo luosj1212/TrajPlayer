@@ -35,7 +35,7 @@ from trajplayer.gl_view import MoleculeGLWidget, default_surface_format
 from trajplayer.frame_store import FrameStore
 from trajplayer.exporter import ExportThread
 from trajplayer.interaction.models import AnalysisRequest, AnalysisResult, SelectionSnapshot
-from trajplayer.analysis import AnalysisScheduler
+from trajplayer.analysis import AnalysisScheduler, analysis_uses_entire_system
 from trajplayer.interaction.measurements import (
     Measurement,
     MeasurementKind,
@@ -1048,6 +1048,19 @@ class TrajPlayerWindow(MainWindowView):
             return
         kind = str(self.analysis_kind_combo.currentData() or "density")
         enabled = self.store is not None
+        system_wide = analysis_uses_entire_system(kind)
+        if system_wide:
+            all_index = self.analysis_scope_combo.findData("all")
+            self.analysis_scope_combo.setCurrentIndex(max(0, all_index))
+        self.analysis_scope_label.setEnabled(enabled and not system_wide)
+        self.analysis_scope_combo.setEnabled(enabled and not system_wide)
+        self.analysis_scope_combo.setToolTip(
+            self._t(
+                "density_system_scope"
+                if system_wide
+                else "analysis_scope_tooltip"
+            )
+        )
         dimensions = kind in {"msd", "msd_windowed"}
         windowed_msd = kind == "msd_windowed"
         profile = kind == "density_profile"
@@ -1097,7 +1110,10 @@ class TrajPlayerWindow(MainWindowView):
         if self.store is None:
             return
         snapshot = self.selection_manager.snapshot()
-        if str(self.analysis_scope_combo.currentData()) == "all":
+        kind = str(self.analysis_kind_combo.currentData())
+        if analysis_uses_entire_system(kind) or str(
+            self.analysis_scope_combo.currentData()
+        ) == "all":
             snapshot = SelectionSnapshot(
                 atom_indices=np.empty((0,), dtype=np.uint32),
                 primary_atom=None,
@@ -1107,7 +1123,6 @@ class TrajPlayerWindow(MainWindowView):
         elif snapshot.atom_indices.size == 0:
             self.show_error(self._t("no_selection"))
             return
-        kind = str(self.analysis_kind_combo.currentData())
         parameters: dict[str, object] = {
             "unwrap_pbc": self.analysis_pbc_check.isChecked(),
             "make_whole": self.analysis_pbc_check.isChecked(),
