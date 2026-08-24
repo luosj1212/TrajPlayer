@@ -1838,7 +1838,15 @@ class TrajPlayerWindow(MainWindowView):
             return
         if self.streamer is None or self.store is None:
             return
-        if not self.streamer.is_window_ready(self.current_frame):
+        camera_spin_seconds = float(
+            self.benchmark_base_metrics.get("benchmark_camera_spin_seconds", 0.0)
+        )
+        ready = (
+            self.streamer.has_frame(self.current_frame)
+            if camera_spin_seconds > 0.0
+            else self.streamer.is_window_ready(self.current_frame)
+        )
+        if not ready:
             return
         self.benchmark_warmup_timer.stop()
         self.benchmark_base_metrics["prefetch_warmup_s"] = (

@@ -99,6 +99,12 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn("self.gl_view.vector_scene_snapshot()", source)
         self.assertIn('self._start_export("molecule_svg"', source)
 
+    def test_static_camera_benchmark_only_waits_for_the_target_frame(self) -> None:
+        source = APP_SOURCE
+
+        self.assertIn("if camera_spin_seconds > 0.0", source)
+        self.assertIn("self.streamer.has_frame(self.current_frame)", source)
+
     def test_window_exposes_box_toggle_when_cells_are_available(self) -> None:
         source = WINDOW_SOURCE
 

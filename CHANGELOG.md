@@ -22,6 +22,8 @@ All notable changes to TrajPlayer are documented here. The project follows
 - Kept projection memory bounded with chunked NumPy transforms and shared color
   definitions; a local 100,000-atom/99,999-bond stress export completed in
   approximately 2.1 seconds and produced a 38.3 MiB SVG
+- Made the static camera-interaction release benchmark wait only for its target
+  frame instead of an unused playback prefetch window
 
 ## [0.1.0-alpha.11] - 2026-08-12
 
