@@ -157,6 +157,11 @@ UI_TEXT = {
     "export_frame_tooltip": {"en": "Export current coordinates (Ctrl+E)", "zh": "导出当前坐标 (Ctrl+E)"},
     "export_screenshot": {"en": "Save screenshot", "zh": "保存截图"},
     "export_screenshot_tooltip": {"en": "Save the current viewport as PNG", "zh": "将当前视口保存为 PNG"},
+    "export_vector": {"en": "Export vector SVG", "zh": "导出矢量 SVG"},
+    "export_vector_tooltip": {
+        "en": "Export only the current molecular viewport as editable vector SVG",
+        "zh": "仅将当前分子视口导出为可编辑的矢量 SVG",
+    },
     "close_analysis": {"en": "Close analysis", "zh": "关闭分析"},
     "analysis_idle": {"en": "Choose an analysis", "zh": "选择一项分析"},
     "analysis_no_result": {"en": "No analysis result", "zh": "暂无分析结果"},
@@ -712,8 +717,12 @@ class MainWindowView(QMainWindow):
         self.export_screenshot_button = QPushButton()
         self.export_screenshot_button.setEnabled(False)
         self.export_screenshot_button.clicked.connect(self.export_viewport_screenshot)
+        self.export_vector_button = QPushButton()
+        self.export_vector_button.setEnabled(False)
+        self.export_vector_button.clicked.connect(self.export_viewport_vector)
         advanced_layout.addWidget(self.export_frame_button)
         advanced_layout.addWidget(self.export_screenshot_button)
+        advanced_layout.addWidget(self.export_vector_button)
         self.advanced_content.hide()
 
         top_bar = self._build_top_bar()
@@ -1105,6 +1114,8 @@ class MainWindowView(QMainWindow):
         self.export_frame_button.setToolTip(self._t("export_frame_tooltip"))
         self.export_screenshot_button.setText(self._t("export_screenshot"))
         self.export_screenshot_button.setToolTip(self._t("export_screenshot_tooltip"))
+        self.export_vector_button.setText(self._t("export_vector"))
+        self.export_vector_button.setToolTip(self._t("export_vector_tooltip"))
 
         self.display_section_label.setText(self._t("display"))
         self.visibility_section_label.setText(self._t("visibility"))

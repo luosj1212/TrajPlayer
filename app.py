@@ -655,6 +655,7 @@ class TrajPlayerWindow(MainWindowView):
         self.commands.set_export_enabled(frame=True, analysis=False)
         self.export_frame_button.setEnabled(True)
         self.export_screenshot_button.setEnabled(True)
+        self.export_vector_button.setEnabled(True)
         self.update_frame_label()
 
     def update_available_controls(self) -> None:
@@ -1334,6 +1335,25 @@ class TrajPlayerWindow(MainWindowView):
         if file_name:
             image = self.gl_view.grabFramebuffer().copy()
             self._start_export("image", Path(file_name), image)
+
+    def export_viewport_vector(self) -> None:
+        if self.store is None or self.displayed_frame < 0:
+            return
+        stem = self.current_source.trajectory_path.stem if self.current_source is not None else "viewport"
+        default = self._default_export_directory() / f"{stem}-frame-{self.displayed_frame + 1}.svg"
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            self._t("export_vector"),
+            str(default),
+            "SVG vector image (*.svg);;All files (*.*)",
+        )
+        if not file_name:
+            return
+        path = Path(file_name)
+        if path.suffix.lower() != ".svg":
+            path = path.with_suffix(".svg")
+        scene = self.gl_view.vector_scene_snapshot()
+        self._start_export("molecule_svg", path, scene)
 
     def _default_export_directory(self) -> Path:
         if self.current_source is not None:
@@ -2111,6 +2131,7 @@ class TrajPlayerWindow(MainWindowView):
         self.commands.set_export_enabled(frame=False, analysis=False)
         self.export_frame_button.setEnabled(False)
         self.export_screenshot_button.setEnabled(False)
+        self.export_vector_button.setEnabled(False)
         self.update_timeline_controls()
 
     def reap_retired_streamers(self) -> None:

@@ -40,6 +40,7 @@ from .trajcore import (
     coarse_depth_order as _coarse_depth_order,
     coarse_position_depth_order,
 )
+from .vector_export import VectorSceneSnapshot
 
 
 GL_FLOAT = 0x1406
@@ -1031,6 +1032,87 @@ class MoleculeGLWidget(QOpenGLWidget):
         values = self._box_cell.view()
         values.setflags(write=False)
         return values
+
+    def vector_scene_snapshot(self) -> VectorSceneSnapshot:
+        """Freeze the exact current camera and visible molecular scene for SVG export."""
+
+        indices = self._visible_atom_indices
+        positions = np.array(
+            self._visible_positions(),
+            dtype=np.float32,
+            copy=True,
+            order="C",
+        )
+        atom_radii = np.ascontiguousarray(self._radii[indices], dtype=np.float32)
+        atom_colors = np.ascontiguousarray(self._colors[indices], dtype=np.float32)
+        atom_selected = np.ascontiguousarray(
+            self._selection_flags[indices],
+            dtype=np.uint8,
+        )
+        global_pairs = np.ascontiguousarray(
+            self._bond_instance_data[:, :2],
+            dtype=np.int32,
+        )
+        if global_pairs.size == 0:
+            local_pairs = np.empty((0, 2), dtype=np.int32)
+        elif self._all_atoms_visible:
+            local_pairs = global_pairs
+        else:
+            global_to_local = np.full(self._atom_count, -1, dtype=np.int32)
+            global_to_local[indices] = np.arange(indices.size, dtype=np.int32)
+            local_pairs = np.ascontiguousarray(
+                global_to_local[global_pairs],
+                dtype=np.int32,
+            )
+        bond_colors = np.ascontiguousarray(
+            self._bond_instance_colors.reshape(-1, 2, 3),
+            dtype=np.float32,
+        )
+        view, projection = self._camera_matrices()
+        box_segments = (
+            np.array(
+                self._box_vertices.reshape(-1, 2, 3),
+                dtype=np.float32,
+                copy=True,
+                order="C",
+            )
+            if self._box_vertex_count > 0
+            else np.empty((0, 2, 3), dtype=np.float32)
+        )
+        periodic_cell = (
+            np.array(self._box_cell, dtype=np.float32, copy=True, order="C")
+            if self._periodic_cell_valid
+            else None
+        )
+        return VectorSceneSnapshot(
+            width=max(1, self.width()),
+            height=max(1, self.height()),
+            view_matrix=np.asarray(view.copyDataTo(), dtype=np.float64).reshape(4, 4),
+            projection_matrix=np.asarray(
+                projection.copyDataTo(),
+                dtype=np.float64,
+            ).reshape(4, 4),
+            positions=positions,
+            atom_indices=np.array(indices, dtype=np.int32, copy=True, order="C"),
+            atom_radii=atom_radii,
+            atom_colors=atom_colors,
+            atom_selected=atom_selected,
+            selection_color=tuple(self._selection_color),
+            bond_pairs=local_pairs,
+            bond_colors=bond_colors,
+            atom_size_scale=self.effective_atom_size_scale,
+            bond_size_scale=self._bond_size_scale,
+            bond_radius=BOND_RADIUS_SCALE,
+            bond_endpoint_radius_scale=(
+                BOND_ENDPOINT_RADIUS_SCALE if self._show_atoms else 0.0
+            ),
+            show_atoms=self._show_atoms,
+            show_bonds=self._show_bonds,
+            periodic_cell=periodic_cell,
+            box_segments=box_segments,
+            box_color=BOX_COLOR,
+            background=tuple(self._background[:3]),
+        )
 
     def project_world_positions(
         self,

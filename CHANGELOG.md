@@ -5,6 +5,24 @@ All notable changes to TrajPlayer are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.0-alpha.12] - 2026-08-24
+
+### Added
+
+- Added editable SVG export for the current molecular viewport, preserving the
+  active camera, crop, representation, visibility, atom and bond sizes,
+  colors, selection highlighting, background, and visible periodic box
+- Exported SVG files contain native atom, bond, and box primitives without an
+  embedded raster image or TrajPlayer controls
+
+### Performance
+
+- Moved SVG encoding and file I/O to the existing cancellable export worker so
+  the UI and OpenGL viewport remain responsive during large exports
+- Kept projection memory bounded with chunked NumPy transforms and shared color
+  definitions; a local 100,000-atom/99,999-bond stress export completed in
+  approximately 2.1 seconds and produced a 38.3 MiB SVG
+
 ## [0.1.0-alpha.11] - 2026-08-12
 
 ### Changed
@@ -225,7 +243,8 @@ All notable changes to TrajPlayer are documented here. The project follows
 - Windows x64 and Linux x86_64 portable packaging
 - Cross-platform tests, CI, release automation, and dependency license collection
 
-[Unreleased]: https://github.com/luosj1212/TrajPlayer/compare/v0.1.0-alpha.11...HEAD
+[Unreleased]: https://github.com/luosj1212/TrajPlayer/compare/v0.1.0-alpha.12...HEAD
+[0.1.0-alpha.12]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.12
 [0.1.0-alpha.11]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.11
 [0.1.0-alpha.10]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.10
 [0.1.0-alpha.9]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.9

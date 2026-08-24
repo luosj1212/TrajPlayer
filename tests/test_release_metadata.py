@@ -7,8 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_release_version() -> None:
-    assert __version__ == "0.1.0a11"
-    assert __display_version__ == "0.1.0-alpha.11"
+    assert __version__ == "0.1.0a12"
+    assert __display_version__ == "0.1.0-alpha.12"
 
 
 def test_runtime_dependencies_are_reproducibly_pinned() -> None:

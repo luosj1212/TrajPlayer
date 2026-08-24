@@ -60,7 +60,8 @@ continue in the specialized tools users already prefer.
   mass, radius of gyration, and pinned-measurement analysis; density and density
   profiles always use the entire system
 - Recent trajectory sources, Light/Dark/System themes, Qt Chinese/English
-  translations, current-frame export, screenshots, and CSV/plot export
+  translations, current-frame export, viewport PNG screenshots, editable
+  current-view SVG export, and CSV/plot export
 - Explicit bond-source status with optional static frame-1 inference
 - Responsive View, Inspect, and Analysis inspector tabs with runtime Chinese
   and English interfaces
@@ -77,7 +78,7 @@ are different from the source archive offered by **Code > Download ZIP**.
 ### Windows Portable Package
 
 1. Open GitHub Releases and download
-   `TrajPlayer-Windows-x64-v0.1.0-alpha.11.zip`, not the source-code ZIP.
+   `TrajPlayer-Windows-x64-v0.1.0-alpha.12.zip`, not the source-code ZIP.
 2. Extract the archive completely.
 3. Run `TrajPlayer\TrajPlayer.exe` from the extracted directory.
 4. Use **Open** or drag trajectory files into the application window.
@@ -102,7 +103,7 @@ extracted `TrajPlayer` folder and run:
 
 ### Linux Portable Package
 
-Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.11.tar.gz` from GitHub Releases
+Download `TrajPlayer-Linux-x86_64-v0.1.0-alpha.12.tar.gz` from GitHub Releases
 and extract the complete archive. Python is not required. Then run:
 
 ```bash
@@ -120,8 +121,8 @@ Generate the same report with
 Download the ZIP that matches the Mac:
 
 - Apple Silicon (M1 or newer):
-  `TrajPlayer-macOS-arm64-v0.1.0-alpha.11.zip`
-- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.11.zip`
+  `TrajPlayer-macOS-arm64-v0.1.0-alpha.12.zip`
+- Intel Mac: `TrajPlayer-macOS-x86_64-v0.1.0-alpha.12.zip`
 
 Extract the complete ZIP, then open `TrajPlayer-macOS/TrajPlayer.app`. Python
 and Conda are not required. The app can be moved to `/Applications` as a whole;
@@ -164,10 +165,16 @@ Generate a diagnostics report from Terminal with:
 - Frame number remains the default x axis. Set a positive frame interval only
   when the trajectory's physical timestep is known.
 - Export the displayed frame as XYZ/extXYZ, save viewport or plot PNG images,
-  or export complete analysis values as CSV.
+  export the current molecular viewport as an editable vector SVG, or export
+  complete analysis values as CSV. Vector export uses the current camera,
+  representation, visibility, atom/bond sizes, colors, background, selection,
+  and periodic box without including the application controls.
 
 Scientific definitions, PBC assumptions, and references are documented in
 [Scientific Analysis](docs/analysis.md).
+
+Editable current-view SVG behavior and limitations are documented in
+[Vector Export](docs/vector-export.md).
 
 ## Supported Files
 

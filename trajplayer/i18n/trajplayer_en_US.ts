@@ -335,6 +335,14 @@
       <translation>Save the current viewport as PNG</translation>
     </message>
     <message>
+      <source>export_vector</source>
+      <translation>Export vector SVG</translation>
+    </message>
+    <message>
+      <source>export_vector_tooltip</source>
+      <translation>Export only the current molecular viewport as editable vector SVG</translation>
+    </message>
+    <message>
       <source>exported</source>
       <translation>Exported {path}</translation>
     </message>

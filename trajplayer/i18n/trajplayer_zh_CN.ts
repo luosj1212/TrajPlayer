@@ -335,6 +335,14 @@
       <translation>将当前视口保存为 PNG</translation>
     </message>
     <message>
+      <source>export_vector</source>
+      <translation>导出矢量 SVG</translation>
+    </message>
+    <message>
+      <source>export_vector_tooltip</source>
+      <translation>仅将当前分子视口导出为可编辑的矢量 SVG</translation>
+    </message>
+    <message>
       <source>exported</source>
       <translation>已导出 {path}</translation>
     </message>

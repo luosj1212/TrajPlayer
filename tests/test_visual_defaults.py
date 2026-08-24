@@ -91,6 +91,14 @@ class VisualDefaultTests(unittest.TestCase):
         self.assertIn("self.gl_view.set_atom_size_scale", source)
         self.assertIn("self.gl_view.set_bond_size_scale", source)
 
+    def test_current_molecular_view_can_be_exported_as_true_vector_svg(self) -> None:
+        source = WINDOW_SOURCE
+
+        self.assertIn("self.export_vector_button = QPushButton()", source)
+        self.assertIn("self.export_viewport_vector", source)
+        self.assertIn("self.gl_view.vector_scene_snapshot()", source)
+        self.assertIn('self._start_export("molecule_svg"', source)
+
     def test_window_exposes_box_toggle_when_cells_are_available(self) -> None:
         source = WINDOW_SOURCE
 

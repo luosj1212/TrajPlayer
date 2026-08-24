@@ -8,6 +8,8 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
+from .vector_export import write_molecule_svg
+
 
 def write_xyz_frame(
     path: Path,
@@ -121,6 +123,12 @@ class ExportThread(QThread):
                 image = self.payload
                 if not isinstance(image, QImage) or not image.save(str(temporary_path), "PNG"):
                     raise OSError("Qt could not encode the PNG image")
+            elif self.kind == "molecule_svg":
+                write_molecule_svg(
+                    temporary_path,
+                    self.payload,
+                    cancelled=self.isInterruptionRequested,
+                )
             else:
                 raise ValueError(f"Unsupported export kind: {self.kind}")
             if self.isInterruptionRequested():
