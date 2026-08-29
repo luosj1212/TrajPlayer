@@ -14,8 +14,21 @@ class StructureFrame:
     cell: np.ndarray | None
 
 
+def first_alpha_run(value: str) -> str:
+    """Return the first contiguous ASCII-letter run in an atom label."""
+
+    run: list[str] = []
+    for character in str(value):
+        is_ascii_letter = "A" <= character <= "Z" or "a" <= character <= "z"
+        if is_ascii_letter:
+            run.append(character)
+        elif run:
+            break
+    return "".join(run)
+
+
 def normalize_symbol(value: str) -> str:
-    letters = "".join(character for character in str(value) if character.isalpha())
+    letters = first_alpha_run(value)
     if not letters:
         return "X"
     for width in (2, 1):

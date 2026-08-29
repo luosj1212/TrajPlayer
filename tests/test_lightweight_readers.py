@@ -11,11 +11,18 @@ from ase.io.trajectory import Trajectory
 from trajplayer.ase_traj_reader import AseUlmTrajectoryReader
 from trajplayer.gromacs_reader import ChemfilesGromacsReader
 from trajplayer.random_access_cache import open_direct_random_access_store
-from trajplayer.structure_reader import read_cif, read_gro, read_pdb
+from trajplayer.reader_common import normalize_symbol
+from trajplayer.structure_reader import read_cif, read_gro, read_pdb, read_structure
 from trajplayer.trajectory_source import TrajectorySource
 
 
 class LightweightReaderTests(unittest.TestCase):
+    def test_atom_label_suffixes_do_not_form_spurious_two_letter_elements(self) -> None:
+        self.assertEqual(normalize_symbol("C00l"), "C")
+        self.assertEqual(normalize_symbol("C_Cl"), "C")
+        self.assertEqual(normalize_symbol("Cl1"), "Cl")
+        self.assertEqual(normalize_symbol("00Cl"), "Cl")
+
     def test_ase_reader_reuses_the_frame_decoded_during_initialization(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "first-frame.traj"
@@ -78,6 +85,46 @@ class LightweightReaderTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_extxyz_atom_labels_are_consistent_across_streamed_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "labels.extxyz"
+            path.write_text(
+                "2\n"
+                "Properties=species:S:1:pos:R:3\n"
+                "C00l 0.0 0.0 0.0\n"
+                "Cl1 1.0 0.0 0.0\n"
+                "2\n"
+                "Properties=species:S:1:pos:R:3\n"
+                "C00l 0.1 0.0 0.0\n"
+                "Cl1 1.1 0.0 0.0\n",
+                encoding="utf-8",
+            )
+            store = open_direct_random_access_store(TrajectorySource(path))
+            try:
+                count = store.frame_count
+                while not store.frame_count_is_final:
+                    count, _complete = store.wait_for_index_update(count, timeout_s=1.0)
+                np.testing.assert_array_equal(store.atom_numbers, [6, 17])
+                positions = np.empty((2, 3), dtype=np.float32)
+                store.read_frame_into(1, positions, None)
+                np.testing.assert_allclose(positions, [[0.1, 0.0, 0.0], [1.1, 0.0, 0.0]])
+            finally:
+                store.close()
+
+    def test_gro_atom_labels_do_not_join_letters_across_digits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "labels.gro"
+            atom_lines = [
+                f"{1:5d}{'LIG':<5s}{'C00l':>5s}{1:5d}{0.100:8.3f}{0.0:8.3f}{0.0:8.3f}\n",
+                f"{2:5d}{'CL':<5s}{'CL':>5s}{2:5d}{0.200:8.3f}{0.0:8.3f}{0.0:8.3f}\n",
+            ]
+            path.write_text(
+                "labels\n    2\n" + "".join(atom_lines) + " 2.0 2.0 2.0\n",
+                encoding="utf-8",
+            )
+            frame = read_structure(path)
+            np.testing.assert_array_equal(frame.atom_numbers, [6, 17])
+
     def test_gro_reader_preserves_coordinates_elements_and_triclinic_cell(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "water.gro"
@@ -117,6 +164,18 @@ class LightweightReaderTests(unittest.TestCase):
             np.testing.assert_array_equal(frame.atom_numbers, [6, 8])
             np.testing.assert_allclose(frame.positions, [[1, 2, 3], [4, 5, 6]])
             np.testing.assert_allclose(frame.cell, np.diag([10, 11, 12]), atol=1.0e-5)
+
+    def test_pdb_fallback_labels_respect_numeric_position_prefixes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "labels.pdb"
+            path.write_text(
+                "ATOM      1 1HG1 LIG A   1       1.000   2.000   3.000  1.00 20.00              \n"
+                "ATOM      2 C00l LIG A   1       2.000   2.000   3.000  1.00 20.00              \n"
+                "END\n",
+                encoding="utf-8",
+            )
+            frame = read_structure(path)
+            np.testing.assert_array_equal(frame.atom_numbers, [1, 6])
 
     def test_cif_reader_converts_fractional_coordinates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

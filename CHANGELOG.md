@@ -5,6 +5,17 @@ All notable changes to TrajPlayer are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.0-alpha.13] - 2026-08-29
+
+### Fixed
+
+- Prevented numbered or suffixed atom labels such as `C00l` from being
+  collapsed into unrelated two-letter elements such as chlorine
+- Kept Python metadata reads and the native memory-mapped XYZ/extXYZ frame
+  parser consistent, while preserving genuine symbols such as `Cl` and `Cl1`
+- Treated digit-prefixed PDB atom names such as `1HG1` as one-letter elements
+  when the explicit PDB element column is absent
+
 ## [0.1.0-alpha.12] - 2026-08-24
 
 ### Added

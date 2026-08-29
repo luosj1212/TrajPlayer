@@ -77,6 +77,29 @@ class TrajcoreTests(unittest.TestCase):
                 expected_atom_numbers=np.array([6], dtype=np.uint16),
             )
 
+    @unittest.skipUnless(
+        trajcore.NATIVE_XYZ_READ_AVAILABLE,
+        "native trajcore XYZ parser is not built",
+    )
+    def test_native_xyz_parser_does_not_join_separated_symbol_letters(self) -> None:
+        rows = b"C00l 1.0 2.0 3.0\nCl1 4.0 5.0 6.0\n"
+        positions = np.empty((2, 3), dtype=np.float32)
+
+        used_native = trajcore.xyz_read_frame_into(
+            rows,
+            data_offset=0,
+            data_end=len(rows),
+            positions=positions,
+            identity_column=0,
+            identity_is_atomic_number=False,
+            position_columns=(1, 2, 3),
+            expected_columns=4,
+            expected_atom_numbers=np.array([6, 17], dtype=np.uint16),
+        )
+
+        self.assertTrue(used_native)
+        np.testing.assert_allclose(positions, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+
     def test_coarse_depth_order_matches_previous_stable_bin_order(self) -> None:
         rng = np.random.default_rng(20260810)
         depth = rng.normal(size=50_000).astype(np.float32)

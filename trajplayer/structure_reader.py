@@ -11,6 +11,7 @@ from ase.data import atomic_numbers, chemical_symbols
 from .reader_common import (
     StructureFrame,
     cell_from_lengths_angles,
+    first_alpha_run,
     normalize_symbol,
     symbols_to_numbers,
 )
@@ -196,7 +197,10 @@ def _read_chemfiles_structure(path: Path) -> StructureFrame:
         for atom_index in range(positions.shape[0]):
             atom = atoms[atom_index]
             number = int(atom.atomic_number)
-            symbol = normalize_symbol(atom.type or atom.name)
+            identity = atom.type or atom.name
+            if path.suffix.lower() == ".pdb" and atom.name[:1].isdigit():
+                identity = first_alpha_run(atom.name)[:1]
+            symbol = normalize_symbol(identity)
             if number <= 0:
                 number = int(atomic_numbers.get(symbol, 0))
             numbers[atom_index] = number
@@ -216,7 +220,7 @@ def _read_chemfiles_structure(path: Path) -> StructureFrame:
 
 
 def _gro_symbol(atom_name: str, residue_name: str) -> str:
-    label = "".join(character for character in atom_name if character.isalpha())
+    label = first_alpha_run(atom_name)
     if not label:
         return "X"
     exact = label[:2]
@@ -252,12 +256,12 @@ def _gro_cell(line: str) -> np.ndarray | None:
 def _pdb_symbol(element_field: str, atom_field: str) -> str:
     if element_field:
         return normalize_symbol(element_field)
-    letters = "".join(character for character in atom_field if character.isalpha())
+    letters = first_alpha_run(atom_field)
     if not letters:
         return "X"
-    if atom_field and atom_field[0].isspace():
+    if atom_field and (atom_field[0].isspace() or atom_field[0].isdigit()):
         return normalize_symbol(letters[0])
-    return normalize_symbol(letters[:2])
+    return normalize_symbol(atom_field)
 
 
 def _read_cif_tables(

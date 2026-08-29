@@ -218,8 +218,11 @@ static uint16_t symbol_token_to_atomic_number(
 ) {
     unsigned char letters[2] = {0, 0};
     int letter_count = 0;
-    for (const unsigned char *cursor = start; cursor < end && letter_count < 2; ++cursor) {
-        if (ascii_alpha(*cursor)) letters[letter_count++] = *cursor;
+    const unsigned char *cursor = start;
+    while (cursor < end && !ascii_alpha(*cursor)) ++cursor;
+    while (cursor < end && ascii_alpha(*cursor) && letter_count < 2) {
+        letters[letter_count++] = *cursor;
+        ++cursor;
     }
     if (letter_count == 0) return 0;
 
