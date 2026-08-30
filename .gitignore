@@ -21,6 +21,8 @@ dist/
 *.sha256
 trajplayer/_trajcore*.pyd
 trajplayer/_trajcore*.so
+trajplayer/_trajcore*.lib
+trajplayer/_trajcore*.pdb
 
 # Trajectory data and generated sidecar caches
 *.tpdata/

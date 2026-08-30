@@ -100,6 +100,40 @@ class TrajcoreTests(unittest.TestCase):
         self.assertTrue(used_native)
         np.testing.assert_allclose(positions, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
 
+    @unittest.skipUnless(
+        trajcore.NATIVE_XYZ_READ_AVAILABLE,
+        "native trajcore XYZ parser is not built",
+    )
+    def test_native_xyz_parser_rejects_nonfinite_positions(self) -> None:
+        positions = np.empty((1, 3), dtype=np.float32)
+        with self.assertRaisesRegex(ValueError, "position is not numeric"):
+            trajcore.xyz_read_frame_into(
+                b"C nan 0 0\n",
+                data_offset=0,
+                data_end=10,
+                positions=positions,
+                identity_column=0,
+                identity_is_atomic_number=False,
+                position_columns=(1, 2, 3),
+                expected_columns=4,
+                expected_atom_numbers=np.array([6], dtype=np.uint16),
+            )
+
+    def test_xyz_native_wrapper_rejects_out_of_range_expected_numbers(self) -> None:
+        positions = np.empty((1, 3), dtype=np.float32)
+        with self.assertRaisesRegex(ValueError, "integers from 0 to 118"):
+            trajcore.xyz_read_frame_into(
+                b"70000 0 0 0\n",
+                data_offset=0,
+                data_end=12,
+                positions=positions,
+                identity_column=0,
+                identity_is_atomic_number=True,
+                position_columns=(1, 2, 3),
+                expected_columns=4,
+                expected_atom_numbers=np.array([70000], dtype=np.int64),
+            )
+
     def test_coarse_depth_order_matches_previous_stable_bin_order(self) -> None:
         rng = np.random.default_rng(20260810)
         depth = rng.normal(size=50_000).astype(np.float32)

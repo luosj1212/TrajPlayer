@@ -5,6 +5,40 @@ All notable changes to TrajPlayer are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.0-alpha.14] - 2026-08-30
+
+### Security
+
+- Refused symbolic-link, Windows junction, and reparse-point cache roots before
+  any recursive cache replacement can occur
+- Added sampled SHA-256 source identities over the first and last 4 MiB so
+  same-size, same-timestamp source rewrites cannot silently reuse stale caches
+- Bounded XYZ/GRO atom counts by source bytes and capped ASE ULM frame metadata
+  at 4 MiB before allocating or decoding attacker-controlled data
+- Rejected NaN/infinite coordinates and out-of-range atomic numbers in both
+  Python readers and the native XYZ/extXYZ parser
+
+### Fixed
+
+- Reported malformed four-to-eight-value GRO box records with a clear format
+  error and preserved cache permission errors instead of treating them as stale
+  data
+- Avoided installing process-wide log and exception hooks when `app` is merely
+  imported by tests or tools
+
+### Performance
+
+- Reused each pinned measurement value for its overlay and control text instead
+  of evaluating the same measurement twice per displayed frame
+
+### Build
+
+- Pinned every GitHub Action to an immutable commit, added weekly Dependabot
+  checks, restricted write permissions to the publish job, and added signed
+  GitHub build-provenance attestations for portable archives
+- Kept performance and bundle-size JSON reports as workflow artifacts instead
+  of publishing them as end-user Release downloads
+
 ## [0.1.0-alpha.13] - 2026-08-29
 
 ### Fixed
@@ -256,7 +290,9 @@ All notable changes to TrajPlayer are documented here. The project follows
 - Windows x64 and Linux x86_64 portable packaging
 - Cross-platform tests, CI, release automation, and dependency license collection
 
-[Unreleased]: https://github.com/luosj1212/TrajPlayer/compare/v0.1.0-alpha.12...HEAD
+[Unreleased]: https://github.com/luosj1212/TrajPlayer/compare/v0.1.0-alpha.14...HEAD
+[0.1.0-alpha.14]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.14
+[0.1.0-alpha.13]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.13
 [0.1.0-alpha.12]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.12
 [0.1.0-alpha.11]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.11
 [0.1.0-alpha.10]: https://github.com/luosj1212/TrajPlayer/releases/tag/v0.1.0-alpha.10

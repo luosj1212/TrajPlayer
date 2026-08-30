@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 import threading
 import uuid
@@ -21,6 +23,8 @@ ATOM_NUMBERS_FILE = "atom_numbers.u16"
 FRAME_AVAILABILITY_FILE = "frame_availability.u8"
 METADATA_FILE = "metadata.json"
 MAX_METADATA_BYTES = 1024 * 1024
+SOURCE_HASH_SAMPLE_BYTES = 4 * 1024 * 1024
+SOURCE_HASH_CHUNK_BYTES = 1024 * 1024
 
 
 class CacheValidationError(ValueError):
@@ -33,13 +37,18 @@ def cache_dir_for_source(source_path: Path) -> Path:
 
 def prepare_cache_directory(root: Path) -> tuple[Path, bool]:
     """Create an empty cache directory without deleting a cache in active use."""
-    root = root.resolve()
-    if not root.exists():
+    root = _absolute_path_without_resolving(root)
+    _reject_linked_cache_path(root)
+    try:
+        root_info = root.lstat()
+    except FileNotFoundError:
         root.mkdir(parents=True, exist_ok=True)
         return root, False
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise CacheValidationError(f"Trajectory cache path is not a directory: {root}")
 
     if os.name != "nt":
-        shutil.rmtree(root)
+        _remove_cache_tree(root)
         root.mkdir(parents=True, exist_ok=True)
         return root, False
 
@@ -62,7 +71,7 @@ def prepare_cache_directory(root: Path) -> tuple[Path, bool]:
             pass
         raise
     try:
-        shutil.rmtree(retired)
+        _remove_cache_tree(retired)
     except OSError:
         pass
     return root, False
@@ -74,20 +83,65 @@ def _unique_sibling(root: Path, purpose: str) -> Path:
     )
 
 
+def _absolute_path_without_resolving(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(Path(path).expanduser())))
+
+
+def _is_link_or_reparse_point(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(getattr(info, "st_file_attributes", 0) & reparse_flag)
+
+
+def _reject_linked_cache_path(path: Path) -> None:
+    if _is_link_or_reparse_point(path):
+        raise CacheValidationError(
+            f"Refusing to use linked trajectory cache directory: {path}"
+        )
+
+
+def _remove_cache_tree(path: Path) -> None:
+    _reject_linked_cache_path(path)
+    shutil.rmtree(path)
+
+
 @dataclass(frozen=True)
 class SourceIdentity:
     path: str | None
     mtime_ns: int
     size: int
+    sample_sha256: str | None = None
 
     @classmethod
     def from_path(cls, path: Path | None, mtime_ns: int = 0, size: int = 0) -> "SourceIdentity":
         if path is None:
-            return cls(path=None, mtime_ns=mtime_ns, size=size)
-        return cls(path=str(path.resolve()), mtime_ns=int(mtime_ns), size=int(size))
+            return cls(path=None, mtime_ns=int(mtime_ns), size=int(size))
+        resolved = path.resolve()
+        source_size = int(size)
+        sample_sha256 = (
+            _sampled_file_sha256(resolved, source_size)
+            if resolved.is_file()
+            else None
+        )
+        return cls(
+            path=str(resolved),
+            mtime_ns=int(mtime_ns),
+            size=source_size,
+            sample_sha256=sample_sha256,
+        )
 
     def to_json(self) -> dict[str, Any]:
-        return {"path": self.path, "mtime_ns": self.mtime_ns, "size": self.size}
+        return {
+            "path": self.path,
+            "mtime_ns": self.mtime_ns,
+            "size": self.size,
+            "sample_sha256": self.sample_sha256,
+        }
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "SourceIdentity":
@@ -95,7 +149,35 @@ class SourceIdentity:
             path=data.get("path"),
             mtime_ns=int(data.get("mtime_ns", 0)),
             size=int(data.get("size", 0)),
+            sample_sha256=data.get("sample_sha256"),
         )
+
+
+def _sampled_file_sha256(path: Path, size: int) -> str:
+    if size < 0:
+        raise ValueError("Source size must be non-negative")
+    digest = hashlib.sha256()
+    digest.update(b"TrajPlayer source sample v1\0")
+    digest.update(str(size).encode("ascii"))
+    digest.update(b"\0")
+    with path.open("rb", buffering=0) as handle:
+        if size <= SOURCE_HASH_SAMPLE_BYTES * 2:
+            _hash_file_bytes(handle, digest, size)
+        else:
+            _hash_file_bytes(handle, digest, SOURCE_HASH_SAMPLE_BYTES)
+            handle.seek(size - SOURCE_HASH_SAMPLE_BYTES)
+            _hash_file_bytes(handle, digest, SOURCE_HASH_SAMPLE_BYTES)
+    return digest.hexdigest()
+
+
+def _hash_file_bytes(handle, digest, byte_count: int) -> None:
+    remaining = int(byte_count)
+    while remaining > 0:
+        chunk = handle.read(min(remaining, SOURCE_HASH_CHUNK_BYTES))
+        if not chunk:
+            raise OSError("Source file changed while its cache identity was computed")
+        digest.update(chunk)
+        remaining -= len(chunk)
 
 
 class BinaryTrajectoryStore:
@@ -195,12 +277,25 @@ class BinaryTrajectoryStore:
         random_access: bool = False,
         temporary_cache: bool = False,
     ) -> "BinaryTrajectoryStore":
+        root = _absolute_path_without_resolving(root)
+        _reject_linked_cache_path(root)
         root = root.resolve()
         root.mkdir(parents=True, exist_ok=True)
 
-        atom_numbers_array = np.asarray(atom_numbers, dtype=np.uint16)
-        if atom_numbers_array.ndim != 1:
+        atom_number_values = np.asarray(atom_numbers)
+        if atom_number_values.ndim != 1:
             raise ValueError("atom_numbers must be a 1D array")
+        if atom_number_values.dtype.kind not in {"i", "u"}:
+            raise ValueError("atom_numbers must contain integers")
+        if atom_number_values.size and (
+            int(np.min(atom_number_values)) < 0
+            or int(np.max(atom_number_values)) > 118
+        ):
+            raise ValueError("atom_numbers must contain values from 0 to 118")
+        atom_numbers_array = np.ascontiguousarray(
+            atom_number_values,
+            dtype=np.uint16,
+        )
         atom_count = int(atom_numbers_array.shape[0])
         if frame_count <= 0:
             raise ValueError("frame_count must be positive")
@@ -226,6 +321,11 @@ class BinaryTrajectoryStore:
             frame_availability[:] = 0
             frame_availability.flush()
 
+        source_identity = SourceIdentity.from_path(
+            source_path,
+            source_mtime_ns,
+            source_size,
+        )
         metadata: dict[str, Any] = {
             "version": STORE_VERSION,
             "dtype": "float32",
@@ -236,17 +336,23 @@ class BinaryTrajectoryStore:
             "available_frame_count": 0 if progressive else int(frame_count),
             "random_access": bool(random_access),
             "temporary_cache": bool(temporary_cache),
-            "source": SourceIdentity.from_path(
-                source_path,
-                source_mtime_ns,
-                source_size,
-            ).to_json(),
+            "source": source_identity.to_json(),
         }
         if source_paths is not None:
-            metadata["source_files"] = [
-                SourceIdentity.from_path(path, path.stat().st_mtime_ns, path.stat().st_size).to_json()
-                for path in source_paths
-            ]
+            source_files: list[dict[str, Any]] = []
+            for path in source_paths:
+                resolved_path = path.resolve()
+                if source_identity.path == str(resolved_path):
+                    identity = source_identity
+                else:
+                    path_stat = resolved_path.stat()
+                    identity = SourceIdentity.from_path(
+                        resolved_path,
+                        path_stat.st_mtime_ns,
+                        path_stat.st_size,
+                    )
+                source_files.append(identity.to_json())
+            metadata["source_files"] = source_files
         if cells is not None:
             metadata["cell_shape"] = [int(frame_count), 3, 3]
         if frame_availability is not None:
@@ -272,6 +378,8 @@ class BinaryTrajectoryStore:
 
     @classmethod
     def open(cls, root: Path, mode: str = "r") -> "BinaryTrajectoryStore":
+        root = _absolute_path_without_resolving(root)
+        _reject_linked_cache_path(root)
         root = root.resolve()
         if mode not in {"r", "r+", "c"}:
             raise ValueError(f"Unsupported trajectory store mode: {mode}")
@@ -284,7 +392,12 @@ class BinaryTrajectoryStore:
             )
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        except (
+            FileNotFoundError,
+            NotADirectoryError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ) as exc:
             raise CacheValidationError(f"Invalid trajectory metadata: {exc}") from exc
         if not isinstance(metadata, dict):
             raise CacheValidationError("Trajectory metadata must be a JSON object")
@@ -496,8 +609,8 @@ class BinaryTrajectoryStore:
         self._closed = True
         if self.metadata.get("temporary_cache"):
             try:
-                shutil.rmtree(self.root)
-            except OSError:
+                _remove_cache_tree(self.root)
+            except (OSError, CacheValidationError):
                 pass
 
     def __enter__(self) -> "BinaryTrajectoryStore":
@@ -511,11 +624,7 @@ class BinaryTrajectoryStore:
             return False
         stat = source_path.stat()
         expected = SourceIdentity.from_path(source_path, stat.st_mtime_ns, stat.st_size)
-        return (
-            self.source.path == expected.path
-            and self.source.mtime_ns == expected.mtime_ns
-            and self.source.size == expected.size
-        )
+        return self.source == expected
 
     def is_valid_for_sources(self, source_paths: Sequence[Path]) -> bool:
         paths = tuple(Path(path).resolve() for path in source_paths)
@@ -602,6 +711,15 @@ def _validate_source_identity(value: object, *, field: str) -> None:
             raise CacheValidationError(
                 f"Trajectory metadata {field!r} has an invalid {key}"
             )
+    sample_sha256 = value.get("sample_sha256")
+    if sample_sha256 is not None and (
+        not isinstance(sample_sha256, str)
+        or len(sample_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in sample_sha256)
+    ):
+        raise CacheValidationError(
+            f"Trajectory metadata {field!r} has an invalid sample_sha256"
+        )
 
 
 def _array_nbytes(name: str, shape: tuple[int, ...], itemsize: int) -> int:
@@ -618,7 +736,7 @@ def _validated_member(root: Path, name: str) -> Path:
         raise CacheValidationError(f"Invalid trajectory cache member: {name!r}")
     try:
         member = (root / name).resolve(strict=True)
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise CacheValidationError(
             f"Missing trajectory cache member: {name}"
         ) from exc

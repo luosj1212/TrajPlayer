@@ -1,11 +1,20 @@
+import importlib
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from trajplayer.startup import format_numpy_import_error, missing_numpy_runtime_components
 
 
 class StartupTests(unittest.TestCase):
+    def test_importing_app_does_not_install_runtime_process_hooks(self) -> None:
+        sys.modules.pop("app", None)
+        with patch("trajplayer.startup.initialize_runtime") as initialize:
+            importlib.import_module("app")
+        initialize.assert_not_called()
+
     def test_missing_numpy_runtime_components_reports_native_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

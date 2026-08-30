@@ -11,6 +11,7 @@ from ase import Atoms
 from ase.io import write
 from ase.io.trajectory import Trajectory
 
+from trajplayer import random_access_cache as random_access_cache_module
 from trajplayer.random_access_cache import (
     FRAME_OFFSETS_FILE,
     open_direct_random_access_store,
@@ -22,6 +23,18 @@ from trajplayer.xyz_index import IndexIoCoordinator, ProgressiveXyzIndex
 
 
 class RandomAccessCacheTests(unittest.TestCase):
+    def test_partial_cache_permission_error_is_not_misclassified_as_corruption(self) -> None:
+        source = TrajectorySource(Path("protected.extxyz"))
+        with patch(
+            "trajplayer.random_access_cache.BinaryTrajectoryStore.open",
+            side_effect=PermissionError("access denied"),
+        ):
+            with self.assertRaisesRegex(PermissionError, "access denied"):
+                random_access_cache_module._open_compatible_partial_store(
+                    source,
+                    Path("protected.extxyz.tpdata"),
+                )
+
     def test_xyz_index_resumes_from_an_incomplete_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

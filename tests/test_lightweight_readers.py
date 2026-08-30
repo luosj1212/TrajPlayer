@@ -1,4 +1,6 @@
 import builtins
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,15 +10,144 @@ import numpy as np
 from ase import Atoms
 from ase.io.trajectory import Trajectory
 
-from trajplayer.ase_traj_reader import AseUlmTrajectoryReader
+from trajplayer.ase_traj_reader import AseUlmTrajectoryReader, MAX_ULM_METADATA_BYTES
 from trajplayer.gromacs_reader import ChemfilesGromacsReader
 from trajplayer.random_access_cache import open_direct_random_access_store
 from trajplayer.reader_common import normalize_symbol
 from trajplayer.structure_reader import read_cif, read_gro, read_pdb, read_structure
 from trajplayer.trajectory_source import TrajectorySource
+from trajplayer.xyz_reader import read_xyz_frame
+
+
+def _first_ulm_item(payload: bytearray) -> tuple[np.ndarray, int, dict[str, object]]:
+    header = np.frombuffer(payload[24:48], dtype="<i8", count=3)
+    offsets_position = int(header[2])
+    frame_offset = int(
+        np.frombuffer(payload[offsets_position : offsets_position + 8], dtype="<i8", count=1)[0]
+    )
+    metadata_size = int(
+        np.frombuffer(payload[frame_offset : frame_offset + 8], dtype="<i8", count=1)[0]
+    )
+    metadata_start = frame_offset + 8
+    metadata = json.loads(
+        bytes(payload[metadata_start : metadata_start + metadata_size]).decode("utf-8")
+    )
+    return header, frame_offset, metadata
 
 
 class LightweightReaderTests(unittest.TestCase):
+    def test_xyz_rejects_impossible_atom_count_before_allocation(self) -> None:
+        source = io.BytesIO(b"2000000000\n\n")
+        with patch(
+            "trajplayer.xyz_reader.np.empty",
+            side_effect=AssertionError("allocation must not be reached"),
+        ):
+            with self.assertRaisesRegex(ValueError, "cannot fit"):
+                read_xyz_frame(source, 2_000_000_000, 0)
+
+    def test_gro_rejects_impossible_atom_count_before_allocation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "oversized.gro"
+            path.write_text("oversized\n2000000000\n", encoding="utf-8")
+            with patch(
+                "trajplayer.structure_reader.np.empty",
+                side_effect=AssertionError("allocation must not be reached"),
+            ):
+                with self.assertRaisesRegex(ValueError, "cannot fit"):
+                    read_gro(path)
+
+    def test_xyz_rejects_nonfinite_coordinates_and_out_of_range_numbers(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Invalid XYZ data at frame 0, atom 0"):
+            read_xyz_frame(io.BytesIO(b"1\n\nH nan 0 0\n"), 1, 0)
+        with self.assertRaisesRegex(ValueError, "Invalid XYZ data at frame 0, atom 0"):
+            read_xyz_frame(
+                io.BytesIO(b"1\nProperties=Z:I:1:pos:R:3\n70000 0 0 0\n"),
+                1,
+                0,
+            )
+
+    def test_structure_fallbacks_reject_nonfinite_coordinates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            gro = Path(tmp) / "bad.gro"
+            gro.write_text(
+                "bad\n1\n"
+                + f"{1:5d}{'LIG':<5s}{'C':>5s}{1:5d}{float('nan'):8.3f}{0.0:8.3f}{0.0:8.3f}\n"
+                + "1 1 1\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "GRO coordinates are invalid"):
+                read_gro(gro)
+
+            pdb = Path(tmp) / "bad.pdb"
+            pdb.write_text(
+                "ATOM      1  C   LIG A   1         nan   0.000   0.000  1.00 20.00           C  \n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "PDB coordinates are invalid"):
+                read_pdb(pdb)
+
+            cif = Path(tmp) / "bad.cif"
+            cif.write_text(
+                "data_bad\nloop_\n_atom_site_type_symbol\n"
+                "_atom_site_cartn_x\n_atom_site_cartn_y\n_atom_site_cartn_z\n"
+                "C nan 0 0\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Non-finite CIF numeric value"):
+                read_cif(cif)
+
+    def test_gro_box_requires_three_or_nine_finite_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad-box.gro"
+            atom_line = f"{1:5d}{'LIG':<5s}{'C':>5s}{1:5d}{0.0:8.3f}{0.0:8.3f}{0.0:8.3f}\n"
+            path.write_text(
+                "bad box\n1\n" + atom_line + "1 1 1 0\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "exactly 3 or 9"):
+                read_gro(path)
+
+    def test_ase_reader_rejects_nonfinite_positions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nonfinite.traj"
+            with Trajectory(str(path), "w") as trajectory:
+                trajectory.write(Atoms("H", positions=[[np.nan, 0.0, 0.0]]))
+            with self.assertRaisesRegex(ValueError, "contains NaN or infinity"):
+                AseUlmTrajectoryReader(path)
+
+    def test_ase_reader_caps_metadata_before_json_allocation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "metadata-limit.traj"
+            with Trajectory(str(path), "w") as trajectory:
+                trajectory.write(Atoms("H", positions=[[0.0, 0.0, 0.0]]))
+            payload = bytearray(path.read_bytes())
+            _header, frame_offset, _metadata = _first_ulm_item(payload)
+            payload[frame_offset : frame_offset + 8] = np.asarray(
+                MAX_ULM_METADATA_BYTES + 1,
+                dtype="<i8",
+            ).tobytes()
+            path.write_bytes(payload)
+
+            with self.assertRaisesRegex(ValueError, "safety limit"):
+                AseUlmTrajectoryReader(path)
+
+    def test_ase_reader_rejects_atomic_numbers_before_uint16_narrowing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad-number.traj"
+            with Trajectory(str(path), "w") as trajectory:
+                trajectory.write(Atoms("H", positions=[[0.0, 0.0, 0.0]]))
+            payload = bytearray(path.read_bytes())
+            _header, _frame_offset, metadata = _first_ulm_item(payload)
+            _shape, dtype_value, number_offset = metadata["numbers."]["ndarray"]
+            number_dtype = np.dtype(str(dtype_value)).newbyteorder("<")
+            encoded = np.asarray([70000], dtype=number_dtype).tobytes()
+            start = int(number_offset)
+            payload[start : start + len(encoded)] = encoded
+            path.write_bytes(payload)
+
+            with self.assertRaisesRegex(ValueError, "atomic numbers from 0 to 118"):
+                AseUlmTrajectoryReader(path)
+
     def test_atom_label_suffixes_do_not_form_spurious_two_letter_elements(self) -> None:
         self.assertEqual(normalize_symbol("C00l"), "C")
         self.assertEqual(normalize_symbol("C_Cl"), "C")

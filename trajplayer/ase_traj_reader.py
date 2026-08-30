@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import json
+import math
+import sys
 from pathlib import Path
 
 import numpy as np
 
-from .reader_common import numbers_to_symbols
+from .reader_common import (
+    numbers_to_symbols,
+    require_finite_coordinates,
+    validated_atom_numbers,
+)
+
+
+MAX_ULM_METADATA_BYTES = 4 * 1024 * 1024
 
 
 class AseUlmTrajectoryReader:
@@ -41,10 +50,7 @@ class AseUlmTrajectoryReader:
                 shape=(frame_count,),
             )
             first = self._read_item(0)
-            self.atom_numbers = self._read_required_array(first, "numbers", 0, np.uint16)
-            if self.atom_numbers.ndim != 1 or self.atom_numbers.size <= 0:
-                raise ValueError("ASE trajectory has an invalid atomic-number array")
-            self.atom_numbers = np.ascontiguousarray(self.atom_numbers, dtype=np.uint16)
+            self.atom_numbers = self._numbers_from_item(first, 0)
             self.symbols = numbers_to_symbols(self.atom_numbers)
             first_positions = self._positions_from_item(first, 0)
             if first_positions.shape != (self.atom_numbers.size, 3):
@@ -79,7 +85,7 @@ class AseUlmTrajectoryReader:
                 f"{(self.atom_count, 3)}"
             )
         if "numbers." in item:
-            numbers = self._read_required_array(item, "numbers", index, np.uint16)
+            numbers = self._numbers_from_item(item, index)
             if not np.array_equal(numbers, self.atom_numbers):
                 raise ValueError(f"Frame {index} atom ordering differs from the first frame")
         cell = self._cell_from_item(item)
@@ -111,7 +117,12 @@ class AseUlmTrajectoryReader:
         if len(size_buffer) != 8:
             raise ValueError(f"Frame {frame_index} metadata is truncated")
         metadata_size = int(np.frombuffer(size_buffer, dtype="<i8", count=1)[0])
-        if metadata_size < 0 or metadata_size > self._file_size:
+        if metadata_size > MAX_ULM_METADATA_BYTES:
+            raise ValueError(
+                f"Frame {frame_index} metadata exceeds the "
+                f"{MAX_ULM_METADATA_BYTES}-byte safety limit"
+            )
+        if metadata_size < 0 or offset + 8 + metadata_size > self._file_size:
             raise ValueError(f"Frame {frame_index} metadata size is invalid")
         metadata = self._file.read(metadata_size)
         if len(metadata) != metadata_size:
@@ -122,14 +133,35 @@ class AseUlmTrajectoryReader:
         return value
 
     def _positions_from_item(self, item: dict[str, object], frame_index: int) -> np.ndarray:
-        return self._read_required_array(item, "positions", frame_index, np.float32)
+        positions = self._read_required_array(
+            item,
+            "positions",
+            frame_index,
+            np.float32,
+        )
+        require_finite_coordinates(
+            positions,
+            context=f"Frame {frame_index} positions",
+        )
+        return positions
+
+    def _numbers_from_item(
+        self,
+        item: dict[str, object],
+        frame_index: int,
+    ) -> np.ndarray:
+        values = self._read_required_array(item, "numbers", frame_index, None)
+        return validated_atom_numbers(
+            values,
+            context=f"Frame {frame_index} atomic numbers",
+        )
 
     def _read_required_array(
         self,
         item: dict[str, object],
         name: str,
         frame_index: int,
-        output_dtype: np.dtype,
+        output_dtype: object | None,
     ) -> np.ndarray:
         descriptor = item.get(f"{name}.")
         if not isinstance(descriptor, dict) or "ndarray" not in descriptor:
@@ -138,24 +170,40 @@ class AseUlmTrajectoryReader:
         if not isinstance(payload, (list, tuple)) or len(payload) != 3:
             raise ValueError(f"Frame {frame_index} has an invalid {name} descriptor")
         shape_value, dtype_value, offset_value = payload
-        shape = tuple(int(size) for size in shape_value)
+        if not isinstance(shape_value, (list, tuple)):
+            raise ValueError(f"Frame {frame_index} has an invalid {name} shape")
+        try:
+            shape = tuple(int(size) for size in shape_value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"Frame {frame_index} has an invalid {name} shape") from exc
         if not shape or any(size < 0 for size in shape):
             raise ValueError(f"Frame {frame_index} has an invalid {name} shape")
-        dtype = np.dtype(str(dtype_value))
+        try:
+            dtype = np.dtype(str(dtype_value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Frame {frame_index} has an invalid {name} dtype") from exc
+        if dtype.hasobject or dtype.itemsize <= 0:
+            raise ValueError(f"Frame {frame_index} {name} dtype cannot contain objects")
         little_endian = item.get("_little_endian", True) is not False
         dtype = dtype.newbyteorder("<" if little_endian else ">")
-        count = int(np.prod(shape, dtype=np.int64))
+        count = math.prod(shape)
+        if count > sys.maxsize // max(1, dtype.itemsize):
+            raise ValueError(f"Frame {frame_index} {name} array is too large")
+        byte_count = count * dtype.itemsize
         offset = int(offset_value)
-        if offset < 0 or offset + count * dtype.itemsize > self._file_size:
+        if offset < 0 or offset + byte_count > self._file_size:
             raise ValueError(f"Frame {frame_index} {name} array lies outside the file")
         if self._file is None:
             raise RuntimeError("ASE trajectory reader is closed")
         self._file.seek(offset)
-        raw = self._file.read(count * dtype.itemsize)
-        if len(raw) != count * dtype.itemsize:
+        raw = self._file.read(byte_count)
+        if len(raw) != byte_count:
             raise ValueError(f"Frame {frame_index} {name} array is truncated")
         array = np.frombuffer(raw, dtype=dtype, count=count).reshape(shape)
-        return np.ascontiguousarray(array, dtype=output_dtype)
+        if output_dtype is None:
+            return np.ascontiguousarray(array)
+        with np.errstate(over="ignore", invalid="ignore"):
+            return np.ascontiguousarray(array, dtype=output_dtype)
 
     @staticmethod
     def _cell_from_item(item: dict[str, object]) -> np.ndarray | None:
@@ -165,6 +213,7 @@ class AseUlmTrajectoryReader:
         cell = np.asarray(value, dtype=np.float32)
         if cell.shape != (3, 3):
             raise ValueError(f"ASE trajectory cell has shape {cell.shape}; expected (3, 3)")
+        require_finite_coordinates(cell, context="ASE trajectory cell")
         if not np.any(cell):
             return None
         return np.ascontiguousarray(cell, dtype=np.float32)

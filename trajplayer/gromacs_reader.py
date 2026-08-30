@@ -4,6 +4,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .reader_common import require_finite_coordinates
+
 
 class ChemfilesGromacsReader:
     """Small native XTC/TRR reader backed by the chemfiles C++ library."""
@@ -51,9 +53,11 @@ class ChemfilesGromacsReader:
             raise ValueError(
                 f"Frame {index} has position shape {positions.shape}; expected (N, 3)"
             )
+        require_finite_coordinates(positions, context=f"Frame {index} positions")
         cell = np.asarray(frame.cell.matrix, dtype=np.float32)
         # Chemfiles exposes basis vectors as columns; TrajPlayer uses row vectors.
         cell = np.ascontiguousarray(cell.T, dtype=np.float32)
+        require_finite_coordinates(cell, context=f"Frame {index} cell")
         if cell.shape != (3, 3) or not np.any(cell):
             return positions, None
         return positions, cell

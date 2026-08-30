@@ -9,11 +9,15 @@ import numpy as np
 from ase.data import atomic_numbers, chemical_symbols
 
 from .reader_common import (
+    MAX_ATOMIC_NUMBER,
     StructureFrame,
     cell_from_lengths_angles,
     first_alpha_run,
     normalize_symbol,
+    require_finite_coordinates,
     symbols_to_numbers,
+    validate_text_atom_count,
+    validated_atom_numbers,
 )
 
 
@@ -43,6 +47,12 @@ def read_gro(path: Path) -> StructureFrame:
             raise ValueError("GRO atom-count line is invalid") from exc
         if atom_count <= 0:
             raise ValueError("GRO atom count must be positive")
+        validate_text_atom_count(
+            atom_count,
+            available_bytes=source.stat().st_size,
+            minimum_atom_bytes=44,
+            format_name="GRO",
+        )
 
         positions = np.empty((atom_count, 3), dtype=np.float32)
         symbols: list[str] = []
@@ -55,12 +65,25 @@ def read_gro(path: Path) -> StructureFrame:
             residue_name = line[5:10].strip()
             atom_name = line[10:15].strip()
             try:
-                positions[atom_index] = [
-                    float(line[20:28]) * 10.0,
-                    float(line[28:36]) * 10.0,
-                    float(line[36:44]) * 10.0,
-                ]
-            except ValueError as exc:
+                coordinates = np.asarray(
+                    [
+                        float(line[20:28]) * 10.0,
+                        float(line[28:36]) * 10.0,
+                        float(line[36:44]) * 10.0,
+                    ],
+                    dtype=np.float64,
+                )
+                require_finite_coordinates(
+                    coordinates,
+                    context=f"GRO coordinates at atom {atom_index}",
+                )
+                with np.errstate(over="ignore", invalid="ignore"):
+                    positions[atom_index] = coordinates
+                require_finite_coordinates(
+                    positions[atom_index],
+                    context=f"GRO coordinates at atom {atom_index}",
+                )
+            except (ValueError, OverflowError) as exc:
                 raise ValueError(f"GRO coordinates are invalid at atom {atom_index}") from exc
             symbols.append(_gro_symbol(atom_name, residue_name))
 
@@ -109,9 +132,16 @@ def read_pdb(path: Path) -> StructureFrame:
             if saw_model and not in_first_model:
                 continue
             try:
-                positions.append(
-                    (float(line[30:38]), float(line[38:46]), float(line[46:54]))
+                coordinates = (
+                    float(line[30:38]),
+                    float(line[38:46]),
+                    float(line[46:54]),
                 )
+                require_finite_coordinates(
+                    np.asarray(coordinates, dtype=np.float64),
+                    context=f"PDB coordinates at line {line_number}",
+                )
+                positions.append(coordinates)
             except ValueError as exc:
                 raise ValueError(f"PDB coordinates are invalid at line {line_number}") from exc
             element_field = line[76:78].strip() if len(line) >= 78 else ""
@@ -120,6 +150,7 @@ def read_pdb(path: Path) -> StructureFrame:
     if not positions:
         raise ValueError("No atoms found in PDB file")
     position_array = np.ascontiguousarray(positions, dtype=np.float32)
+    require_finite_coordinates(position_array, context="PDB coordinates")
     return StructureFrame(
         positions=position_array,
         atom_numbers=symbols_to_numbers(symbols),
@@ -169,7 +200,16 @@ def read_cif(path: Path) -> StructureFrame:
         if fractional_indices is not None and cartesian_indices is None:
             assert cell is not None
             coordinates = coordinates @ np.asarray(cell, dtype=np.float64)
-        positions[row_index] = coordinates
+        require_finite_coordinates(
+            coordinates,
+            context=f"CIF coordinates at atom {row_index}",
+        )
+        with np.errstate(over="ignore", invalid="ignore"):
+            positions[row_index] = coordinates
+        require_finite_coordinates(
+            positions[row_index],
+            context=f"CIF coordinates at atom {row_index}",
+        )
     if positions.shape[0] == 0:
         raise ValueError("No atoms found in CIF file")
     return StructureFrame(
@@ -191,7 +231,8 @@ def _read_chemfiles_structure(path: Path) -> StructureFrame:
         positions = np.ascontiguousarray(frame.positions, dtype=np.float32)
         if positions.ndim != 2 or positions.shape[1] != 3 or positions.shape[0] <= 0:
             raise ValueError(f"Invalid coordinate array in {path.name}")
-        numbers = np.empty(positions.shape[0], dtype=np.uint16)
+        require_finite_coordinates(positions, context=f"Coordinates in {path.name}")
+        numbers = np.empty(positions.shape[0], dtype=np.int64)
         symbols: list[str] = []
         atoms = frame.topology.atoms
         for atom_index in range(positions.shape[0]):
@@ -203,15 +244,23 @@ def _read_chemfiles_structure(path: Path) -> StructureFrame:
             symbol = normalize_symbol(identity)
             if number <= 0:
                 number = int(atomic_numbers.get(symbol, 0))
+            if number < 0 or number > MAX_ATOMIC_NUMBER:
+                raise ValueError(
+                    f"Atom {atom_index} in {path.name} has invalid atomic number {number}"
+                )
             numbers[atom_index] = number
             if number > 0:
                 symbol = chemical_symbols[number]
             symbols.append(symbol)
         cell = np.asarray(frame.cell.matrix, dtype=np.float32).T
+        require_finite_coordinates(cell, context=f"Cell in {path.name}")
         cell_value = np.ascontiguousarray(cell, dtype=np.float32) if np.any(cell) else None
         return StructureFrame(
             positions=positions,
-            atom_numbers=np.ascontiguousarray(numbers, dtype=np.uint16),
+            atom_numbers=validated_atom_numbers(
+                numbers,
+                context=f"Atomic numbers in {path.name}",
+            ),
             symbols=tuple(symbols),
             cell=cell_value,
         )
@@ -246,10 +295,15 @@ def _gro_cell(line: str) -> np.ndarray | None:
         raise ValueError("GRO box record is invalid") from exc
     if len(values) < 3:
         return None
-    cell = np.diag(values[:3]).astype(np.float32)
-    if len(values) >= 9:
+    if len(values) not in {3, 9}:
+        raise ValueError("GRO box record must contain exactly 3 or 9 values")
+    require_finite_coordinates(np.asarray(values), context="GRO box record")
+    with np.errstate(over="ignore", invalid="ignore"):
+        cell = np.diag(values[:3]).astype(np.float32)
+    if len(values) == 9:
         cell.flat[[1, 2, 3, 5, 6, 7]] = values[3:9]
     cell *= np.float32(10.0)
+    require_finite_coordinates(cell, context="GRO box record")
     return np.ascontiguousarray(cell, dtype=np.float32) if np.any(cell) else None
 
 

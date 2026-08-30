@@ -112,7 +112,7 @@ def build_cache_from_ase(
             symbols=list(direct.reader.summary.symbols),
             has_cell=direct.has_cells,
         )
-        root = cache_root.resolve() if cache_root is not None else cache_dir_for_source(source_path)
+        root = Path(cache_root) if cache_root is not None else cache_dir_for_source(source_path)
         root, temporary_cache = prepare_cache_directory(root)
         stat = source_path.stat()
         store = BinaryTrajectoryStore.create(

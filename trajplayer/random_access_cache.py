@@ -13,6 +13,7 @@ import numpy as np
 
 from .binary_store import (
     BinaryTrajectoryStore,
+    CacheValidationError,
     SourceIdentity,
     cache_dir_for_source,
     prepare_cache_directory,
@@ -228,7 +229,7 @@ def open_random_access_session(
     *,
     status_callback: Callable[[str], None] | None = None,
 ) -> tuple[RandomAccessFrameReader, BinaryTrajectoryStore]:
-    canonical_root = cache_dir_for_source(source.trajectory_path).resolve()
+    canonical_root = cache_dir_for_source(source.trajectory_path)
     root = canonical_root
     temporary_cache = False
     store = _open_compatible_partial_store(source, canonical_root)
@@ -658,7 +659,7 @@ def _open_compatible_partial_store(
 ) -> BinaryTrajectoryStore | None:
     try:
         store = BinaryTrajectoryStore.open(root, mode="r+")
-    except Exception:
+    except (CacheValidationError, FileNotFoundError):
         return None
     if not store.supports_random_access or not store.is_valid_for_sources(source.paths):
         store.close()

@@ -55,7 +55,7 @@ def build_cache_from_gromacs(
 ) -> BinaryTrajectoryStore:
     topology_path, trajectory_path = _validated_paths(source)
     summary = inspect_gromacs_source(source)
-    root = cache_root.resolve() if cache_root is not None else cache_dir_for_source(trajectory_path)
+    root = Path(cache_root) if cache_root is not None else cache_dir_for_source(trajectory_path)
     root, temporary_cache = prepare_cache_directory(root)
 
     trajectory_stat = trajectory_path.stat()

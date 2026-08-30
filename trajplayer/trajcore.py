@@ -61,8 +61,6 @@ def xyz_read_frame_into(
 ) -> bool:
     """Parse XYZ atom rows directly into a caller-owned contiguous frame buffer."""
 
-    if not NATIVE_XYZ_READ_AVAILABLE:
-        return False
     layout = np.asarray(
         [
             int(identity_column),
@@ -73,7 +71,22 @@ def xyz_read_frame_into(
         ],
         dtype=np.int32,
     )
-    expected = np.ascontiguousarray(expected_atom_numbers, dtype=np.uint16)
+    expected_values = np.asarray(expected_atom_numbers)
+    if (
+        expected_values.ndim != 1
+        or expected_values.dtype.kind not in {"i", "u"}
+        or (
+            expected_values.size
+            and (
+                int(np.min(expected_values)) < 0
+                or int(np.max(expected_values)) > 118
+            )
+        )
+    ):
+        raise ValueError("expected_atom_numbers must contain integers from 0 to 118")
+    expected = np.ascontiguousarray(expected_values, dtype=np.uint16)
+    if not NATIVE_XYZ_READ_AVAILABLE:
+        return False
     _native.xyz_read_frame_into(
         source,
         int(data_offset),

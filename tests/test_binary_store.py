@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -19,6 +20,52 @@ from trajplayer.binary_store import (
 
 
 class BinaryTrajectoryStoreTests(unittest.TestCase):
+    def test_create_rejects_out_of_range_atomic_numbers_before_narrowing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "values from 0 to 118"):
+                BinaryTrajectoryStore.create(
+                    Path(tmp) / "bad-number.tpdata",
+                    frame_count=1,
+                    atom_numbers=np.array([70000], dtype=np.int64),
+                    symbols=None,
+                    source_path=None,
+                    source_mtime_ns=0,
+                    source_size=0,
+                )
+
+    def test_prepare_rejects_linked_cache_without_deleting_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "important"
+            target.mkdir()
+            marker = target / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+            root = Path(tmp) / "sample.traj.tpdata"
+            try:
+                root.symlink_to(target, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks are unavailable: {exc}")
+
+            with self.assertRaisesRegex(CacheValidationError, "linked trajectory cache"):
+                prepare_cache_directory(root)
+
+            self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+
+    def test_prepare_rejects_windows_reparse_directory_without_removing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "junction.tpdata"
+            root.mkdir()
+            marker = root / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+
+            with patch(
+                "trajplayer.binary_store._is_link_or_reparse_point",
+                return_value=True,
+            ):
+                with self.assertRaisesRegex(CacheValidationError, "linked trajectory cache"):
+                    prepare_cache_directory(root)
+
+            self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+
     @unittest.skipUnless(os.name == "nt", "Windows file locking regression")
     def test_locked_cache_directory_uses_temporary_sibling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,6 +170,34 @@ class BinaryTrajectoryStoreTests(unittest.TestCase):
             with BinaryTrajectoryStore.open(root) as reopened:
                 self.assertTrue(reopened.is_valid_for_source(source))
             source.write_bytes(b"abcd")
+            with BinaryTrajectoryStore.open(root) as reopened:
+                self.assertFalse(reopened.is_valid_for_source(source))
+
+    def test_source_identity_rejects_same_size_same_mtime_content_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "sample.traj"
+            source.write_bytes(b"abc")
+            source_stat = source.stat()
+            root = cache_dir_for_source(source)
+            with BinaryTrajectoryStore.create(
+                root,
+                frame_count=1,
+                atom_numbers=np.array([6], dtype=np.uint16),
+                symbols=["C"],
+                source_path=source,
+                source_mtime_ns=source_stat.st_mtime_ns,
+                source_size=source_stat.st_size,
+            ):
+                pass
+
+            source.write_bytes(b"xyz")
+            os.utime(
+                source,
+                ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns),
+            )
+            self.assertEqual(source.stat().st_size, source_stat.st_size)
+            self.assertEqual(source.stat().st_mtime_ns, source_stat.st_mtime_ns)
+
             with BinaryTrajectoryStore.open(root) as reopened:
                 self.assertFalse(reopened.is_valid_for_source(source))
 

@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import math
+import os
 import re
 from dataclasses import dataclass
 from typing import BinaryIO
 
 import numpy as np
 
-from .reader_common import StructureFrame, normalize_symbol, numbers_to_symbols, symbols_to_numbers
+from .reader_common import (
+    MAX_ATOMIC_NUMBER,
+    StructureFrame,
+    normalize_symbol,
+    numbers_to_symbols,
+    require_finite_coordinates,
+    symbols_to_numbers,
+    validate_text_atom_count,
+)
+
+
+_MINIMUM_XYZ_ATOM_BYTES = 7
+_FLOAT32_MAX = float(np.finfo(np.float32).max)
 
 
 _KEY_VALUE_PATTERN = re.compile(
@@ -56,6 +70,12 @@ def inspect_xyz_frame_buffer(
         "utf-8",
         errors="replace",
     )
+    validate_text_atom_count(
+        atom_count,
+        available_bytes=source_size - (comment_end + 1),
+        minimum_atom_bytes=_MINIMUM_XYZ_ATOM_BYTES,
+        format_name=f"XYZ frame {frame_index}",
+    )
     metadata = _parse_comment(comment.strip())
     properties = _parse_properties(metadata.get("Properties"))
     species_column, number_column, position_columns, expected_columns = _column_layout(
@@ -92,6 +112,15 @@ def read_xyz_frame(handle: BinaryIO, atom_count: int, frame_index: int) -> Struc
     properties = _parse_properties(metadata.get("Properties"))
     species_column, number_column, position_columns, expected_columns = _column_layout(properties)
 
+    remaining_bytes = _remaining_binary_bytes(handle)
+    if remaining_bytes is not None:
+        validate_text_atom_count(
+            atom_count,
+            available_bytes=remaining_bytes,
+            minimum_atom_bytes=_MINIMUM_XYZ_ATOM_BYTES,
+            format_name=f"XYZ frame {frame_index}",
+        )
+
     positions = np.empty((atom_count, 3), dtype=np.float32)
     symbols: list[str] = []
     numbers = np.empty(atom_count, dtype=np.uint16) if number_column is not None else None
@@ -106,12 +135,21 @@ def read_xyz_frame(handle: BinaryIO, atom_count: int, frame_index: int) -> Struc
                 f"expected at least {expected_columns}"
             )
         try:
-            positions[atom_index] = [float(values[column]) for column in position_columns]
+            coordinates = [float(values[column]) for column in position_columns]
+            if not all(
+                math.isfinite(value) and abs(value) <= _FLOAT32_MAX
+                for value in coordinates
+            ):
+                raise ValueError("coordinates must be finite float32 values")
+            positions[atom_index] = coordinates
             if number_column is not None and numbers is not None:
-                numbers[atom_index] = int(values[number_column])
+                atomic_number = int(values[number_column])
+                if atomic_number < 0 or atomic_number > MAX_ATOMIC_NUMBER:
+                    raise ValueError("atomic number is out of range")
+                numbers[atom_index] = atomic_number
             else:
                 symbols.append(normalize_symbol(values[species_column]))
-        except (TypeError, ValueError, IndexError) as exc:
+        except (TypeError, ValueError, OverflowError, IndexError) as exc:
             raise ValueError(
                 f"Invalid XYZ data at frame {frame_index}, atom {atom_index}"
             ) from exc
@@ -193,5 +231,25 @@ def _parse_lattice(value: str | None) -> np.ndarray | None:
         raise ValueError("XYZ Lattice metadata contains a non-numeric value") from exc
     if len(values) != 9:
         raise ValueError("XYZ Lattice metadata must contain nine values")
-    cell = np.asarray(values, dtype=np.float32).reshape(3, 3)
+    with np.errstate(over="ignore", invalid="ignore"):
+        cell = np.asarray(values, dtype=np.float32).reshape(3, 3)
+    require_finite_coordinates(cell, context="XYZ Lattice metadata")
     return np.ascontiguousarray(cell, dtype=np.float32) if np.any(cell) else None
+
+
+def _remaining_binary_bytes(handle: BinaryIO) -> int | None:
+    try:
+        current = int(handle.tell())
+    except (AttributeError, OSError, ValueError):
+        return None
+    try:
+        return max(0, int(os.fstat(handle.fileno()).st_size) - current)
+    except (AttributeError, OSError, ValueError):
+        pass
+    try:
+        handle.seek(0, os.SEEK_END)
+        end = int(handle.tell())
+        handle.seek(current, os.SEEK_SET)
+    except (AttributeError, OSError, ValueError):
+        return None
+    return max(0, end - current)

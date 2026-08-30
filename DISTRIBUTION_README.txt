@@ -1,4 +1,4 @@
-TrajPlayer v0.1.0-alpha.13 distribution
+TrajPlayer v0.1.0-alpha.14 distribution
 
 Windows
 1. Extract the entire TrajPlayer folder from the zip archive.

@@ -12,7 +12,8 @@ PROCESS_STARTED_S = time.perf_counter()
 from trajplayer.startup import error_log_path, initialize_runtime, report_numpy_import_error
 
 
-initialize_runtime()
+if __name__ == "__main__":
+    initialize_runtime()
 
 try:
     import numpy as np
@@ -968,12 +969,14 @@ class TrajPlayerWindow(MainWindowView):
             self.pin_measurement_button.setEnabled(True)
 
         entries = []
+        measurement_values: dict[object, MeasurementValue] = {}
         if positions.ndim == 2 and positions.shape[1:] == (3,):
             for measurement in self.measurement_manager.measurements:
                 try:
                     value = evaluate_measurement(measurement, positions, cell)
                 except (IndexError, ValueError):
                     continue
+                measurement_values[measurement.measurement_id] = value
                 entries.append(overlay_entry(value, positions, cell))
             if draft_value is not None and not any(
                 item.atom_indices == draft_value.measurement.atom_indices
@@ -987,10 +990,10 @@ class TrajPlayerWindow(MainWindowView):
 
         selected_id = str(self.measurement_combo.currentData() or "")
         for index, measurement in enumerate(self.measurement_manager.measurements):
-            try:
-                value = evaluate_measurement(measurement, positions, cell)
+            value = measurement_values.get(measurement.measurement_id)
+            if value is not None:
                 text = self._format_measurement_value(value)
-            except (IndexError, ValueError):
+            else:
                 atoms = "-".join(str(atom + 1) for atom in measurement.atom_indices)
                 text = f"{self._measurement_kind_name(measurement.kind)} {atoms}"
             self.measurement_combo.setItemText(index, text)

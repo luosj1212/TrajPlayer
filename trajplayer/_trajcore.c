@@ -206,7 +206,7 @@ static int parse_atomic_number_token(
         ++cursor;
         ++digits;
     }
-    if (digits == 0 || cursor != end) return 0;
+    if (digits == 0 || cursor != end || value > 118u) return 0;
     *output = (uint16_t)value;
     return 1;
 }
@@ -1430,7 +1430,7 @@ static PyObject *trajcore_xyz_read_frame_into(PyObject *self, PyObject *args) {
             for (int axis = 0; axis < 3; ++axis) {
                 if (column != position_columns[axis]) continue;
                 float value;
-                if (!parse_float_token(token_start, token_end, &value)) {
+                if (!parse_float_token(token_start, token_end, &value) || !isfinite(value)) {
                     error.status = XYZ_PARSE_INVALID_POSITION;
                     error.atom = atom;
                     error.column = column;
