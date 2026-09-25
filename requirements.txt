@@ -1,4 +1,4 @@
-ase==3.27.0
+ase==3.29.0
 chemfiles==0.10.4
 numpy==2.2.6
 PySide6==6.10.2
